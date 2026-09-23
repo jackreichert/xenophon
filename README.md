@@ -6,6 +6,8 @@ File, update, close, and browse project tickets as flat markdown notes in an Obs
 
 The agent protocol is in [SKILL.md](SKILL.md). The helper is [scripts/ticket.mjs](scripts/ticket.mjs).
 
+Xenophon is named for Xenophon of Athens: Socratic student, historian of the Ten Thousand, and author of Oeconomicus, the first Western handbook on management as a practiced art rather than a temperament. A ticket vault is the same job at a smaller scale—file the work, keep the books, inspect what was actually verified, and move closed items out of the active house until the line reaches the sea. The markdown files are the estate; the script is only the steward who keeps the ids and the index honest.
+
 ## Requirements
 
 - Node.js 18 or newer. The script uses only `node:` built-ins; nothing to `npm install`.
