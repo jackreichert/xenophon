@@ -13,6 +13,10 @@
  *                  [--type bug] [--priority 2] [--labels a,b]
  *                  [--external jira-X] [--blocked-by id1,id2]
  *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
+ *   ticket.mjs decide <id> --decision "what | options | recommendation | stakes"
+ *   ticket.mjs decide <id> --clear            # decision made; stops listing as needed
+ *   ticket.mjs log <id> "dated update"
+ *   ticket.mjs promote <id>                   # print tracker-ready markdown; calls nothing
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs close <id> [--reason "..."]
  *   ticket.mjs reopen <id>
@@ -259,6 +263,63 @@ function renderTemplate(spec) {
     return sections.map(([h, b]) => `## ${h}\n\n${b}`).join('\n\n');
 }
 
+// ── Sections ──────────────────────────────────────────────────────────────────
+/** Split a body into H2 sections; sections[0] is the preamble. Fence-aware. */
+function splitSections(body) {
+    const secs = [{ heading: null, line: null, lines: [] }];
+    let fence = false;
+    for (const l of body.split('\n')) {
+        if (/^(```|~~~)/.test(l)) fence = !fence;
+        const m = !fence && l.match(/^##\s+(.*\S)\s*$/);
+        if (m) secs.push({ heading: m[1], line: l, lines: [] });
+        else secs.at(-1).lines.push(l);
+    }
+    return secs;
+}
+const joinSections = (secs) => `${secs.flatMap((x) => (x.line === null ? x.lines : [x.line, ...x.lines])).join('\n').trimEnd()}\n`;
+
+/** Headings that never leave the vault. Matched by prefix so older shapes ("Decision (...)") count too. */
+const INTERNAL_HEADING = /^(decisions? needed|decision\b|evidence|links?\b|log\b|resolution|internal)/i;
+const DECISIONS_HEADING = /^decisions needed/i;
+
+function trimBlankEnd(lines) {
+    while (lines.length && !lines.at(-1).trim()) lines.pop();
+    return lines;
+}
+
+/** Append lines to the first section matching `re`, creating `newHeading` (before any internal tail) if absent. */
+function appendToSection(body, re, newHeading, add, { intro = [] } = {}) {
+    const secs = splitSections(body);
+    let sec = secs.find((x) => x.heading && re.test(x.heading));
+    if (!sec) {
+        sec = { heading: newHeading, line: `## ${newHeading}`, lines: ['', ...intro, ...(intro.length ? [''] : [])] };
+        const tail = secs.findIndex((x) => x.heading && /^(evidence|links?\b|log\b)/i.test(x.heading));
+        secs.splice(tail === -1 ? secs.length : tail, 0, sec);
+    }
+    trimBlankEnd(sec.lines);
+    if (!sec.lines.length || sec.lines[0].trim()) sec.lines.unshift('');
+    sec.lines.push(...add, '');
+    return joinSections(secs);
+}
+
+/** Keep the one-line header (`**Decision needed** ...`) in step with the frontmatter. */
+function syncDecisionHeader(body, needed) {
+    const seg = `**Decision needed** \`${needed ? 'yes' : 'no'}\``;
+    const lines = body.split('\n');
+    const end = lines.findIndex((l) => /^##\s/.test(l));
+    const head = lines.slice(0, end === -1 ? lines.length : end);
+    let i = head.findIndex((l) => l.startsWith('**Decision needed**'));
+    if (i !== -1) lines[i] = lines[i].replace(/\*\*Decision needed\*\* `[^`]*`/, seg);
+    else if ((i = head.findIndex((l) => l.startsWith('**Status**'))) !== -1) lines[i] = `${seg} · ${lines[i]}`;
+    return lines.join('\n');
+}
+
+function saveTicket(t, body) {
+    t.frontmatter.updated = today();
+    console.log(`${writeFile(t.path, `${renderFrontmatter(t.frontmatter)}\n${body}`)}  ${t.path}`);
+    rebuildIndex();
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 function cmdNew() {
     ensureDirs();
@@ -391,6 +452,78 @@ function cmdSet() {
     rebuildIndex();
 }
 
+function cmdDecide() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs decide <id> --decision "what | options | recommendation | stakes" | --clear'); process.exit(1); }
+    const t = findTicket(id);
+    let body = t.body;
+
+    if (has('clear')) {
+        t.frontmatter.decision_needed = false;
+        body = syncDecisionHeader(body, false);
+        saveTicket(t, body);
+        return;
+    }
+
+    const decisions = args('decision').map(parseDecision);
+    if (!decisions.length) { console.error('Pass --decision "what | options | recommendation | stakes" or --clear.'); process.exit(1); }
+
+    const secs = splitSections(body);
+    const sec = secs.find((x) => x.heading && DECISIONS_HEADING.test(x.heading));
+    const existing = sec ? sec.lines.filter((l) => l.trim() && !l.startsWith('> Internal')) : [];
+    const placeholder = existing.length === 1 && /^none\.?$/i.test(existing[0].trim());
+    if (placeholder) {
+        sec.lines = ['', INTERNAL_NOTE, ''];
+        body = joinSections(secs);
+    }
+    const start = placeholder ? 0 : existing.filter((l) => /^\d+\. \*\*/.test(l)).length;
+    body = appendToSection(body, DECISIONS_HEADING, 'Decisions needed (for Jack)',
+        decisions.map((d, i) => renderDecision(start + i + 1, d)), { intro: [INTERNAL_NOTE] });
+    t.frontmatter.decision_needed = true;
+    saveTicket(t, syncDecisionHeader(body, true));
+}
+
+function cmdLog() {
+    const [id, ...rest] = positional;
+    const msg = rest.join(' ').trim();
+    if (!id || !msg) { console.error('Usage: ticket.mjs log <id> "update"'); process.exit(1); }
+    const t = findTicket(id);
+    saveTicket(t, appendToSection(t.body, /^log\b/i, 'Log', [`- ${today()}: ${msg}`]));
+}
+
+/** Print tracker-ready markdown: internal sections dropped, vault references stripped. Never calls a tracker. */
+function cmdPromote() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs promote <id>'); process.exit(1); }
+    const t = findTicket(id);
+    const [pre, ...secs] = splitSections(t.body);
+
+    const stray = pre.lines.filter((l) => l.trim() && !/^#\s/.test(l) && !l.startsWith('**Status**') && !l.startsWith('**Decision needed**') && !/^(#[\w-]+\s*)+$/.test(l.trim()));
+    const kept = secs.filter((x) => !INTERNAL_HEADING.test(x.heading));
+    if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
+        console.error('warning: no "What done looks like" section; add one before filing.');
+    }
+
+    const projects = existsSync(join(vault, 'Projects')) ? readdirSync(join(vault, 'Projects')) : [];
+    const idRe = projects.length
+        ? new RegExp(`\\b(?:${projects.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})-\\d+\\b`, 'g')
+        : null;
+    let removed = 0;
+    const strip = (text) => {
+        const bump = (r) => { removed += 1; return r; };
+        let out = text.replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, (_, _t, alias) => bump(alias))
+            .replace(/\[\[[^\]]*\]\]/g, () => bump(''))
+            .replace(/obsidian:\/\/\S+/g, () => bump(''));
+        if (idRe) out = out.replace(idRe, () => bump(''));
+        return out;
+    };
+
+    const text = strip([`# ${t.frontmatter.title}`, '', ...stray, ...kept.flatMap((x) => [x.line, ...x.lines])].join('\n'))
+        .replace(/\n{3,}/g, '\n\n');
+    if (removed) console.error(`warning: removed ${removed} vault reference(s); re-read the output for dangling sentences.`);
+    process.stdout.write(`${text.trimEnd()}\n`);
+}
+
 function cmdList() {
     // Default view is "active work": everything not closed. Filtering on the
     // literal string 'open' would hide a ticket the moment it went in-progress.
@@ -480,9 +613,9 @@ function rebuildIndex() {
     console.log(`${writeFile(path, lines.join('\n'))}  ${path}`);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|decide|log|promote|index> [...]`);
     process.exit(1);
 }
 commands[cmd]();

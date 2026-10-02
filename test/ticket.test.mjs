@@ -82,3 +82,71 @@ test('list --decisions shows only tickets awaiting a decision; old tickets are u
     run('set', 'demo-900', '--priority', '1');
     assert.doesNotMatch(read('demo-900'), /decision_needed/);
 });
+
+// ── decide / log ──────────────────────────────────────────────────────────────
+test('decide replaces "None", numbers further decisions, and syncs frontmatter and header', () => {
+    const { run, read } = setup();
+    run(...BASE);
+    assert.equal(run('decide', 'demo-001', '--decision', 'Ship now? | yes or wait | wait | revenue').status, 0);
+    let t = read('demo-001');
+    assert.match(t, /decision_needed: true/);
+    assert.match(t, /\*\*Decision needed\*\* `yes` · \*\*Status\*\*/);
+    assert.doesNotMatch(t, /\nNone\n/);
+    assert.match(t, /1\. \*\*Ship now\?\*\*/);
+    run('decide', 'demo-001', '--decision', 'Who owns it? | A or B | A | delay');
+    t = read('demo-001');
+    assert.match(t, /2\. \*\*Who owns it\?\*\*/);
+    assert.ok(t.indexOf('2. **Who owns') < t.indexOf('## Evidence'), 'appended inside the decisions section');
+    run('decide', 'demo-001', '--clear');
+    t = read('demo-001');
+    assert.match(t, /decision_needed: false/);
+    assert.match(t, /\*\*Decision needed\*\* `no`/);
+    assert.match(t, /1\. \*\*Ship now\?\*\*/, 'clear keeps the record');
+    assert.notEqual(run('decide', 'demo-001').status, 0);
+});
+
+test('log appends a dated line inside the Log section and creates it on old tickets', () => {
+    const { run, file, read } = setup();
+    run(...BASE);
+    run('log', 'demo-001', 'Reproduced on', 'stg');
+    const t = read('demo-001');
+    assert.match(t, new RegExp(`- ${new Date().toISOString().slice(0, 10)}: Reproduced on stg\\n$`));
+    mkdirSync(dirname(file('demo-900')), { recursive: true });
+    writeFileSync(file('demo-900'), '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open`\n\n## Description\n\nbody\n');
+    assert.equal(run('log', 'demo-900', 'poked it').status, 0);
+    assert.match(read('demo-900'), /## Description\n\nbody\n\n## Log\n\n- \d{4}-\d\d-\d\d: poked it\n$/);
+    assert.equal(run('decide', 'demo-900', '--decision', 'Q? | a or b | a | s').status, 0);
+    const o = read('demo-900');
+    assert.match(o, /\*\*Decision needed\*\* `yes` · \*\*Status\*\*/);
+    assert.ok(o.indexOf('## Decisions needed') < o.indexOf('## Log'), 'decisions inserted before the log');
+});
+
+// ── promote ───────────────────────────────────────────────────────────────────
+test('promote prints tracker-ready markdown without internal sections or vault references', () => {
+    const { run, vault } = setup();
+    mkdirSync(join(vault, 'Projects', 'other'), { recursive: true });
+    run(...BASE, '--context', 'Mirrors demo-007 and [[2026-10-02-review]]; see [[demo-003|the retry note]]. PR #12, src/a.ts:10.',
+        '--points', '3', '--decision', 'Cap? | 3 or 5 | 3 | on-call', '--evidence', 'src/a.ts:10 - loop', '--link', 'demo-002 and ledger zawg');
+    run('log', 'demo-001', 'secret internal note');
+    const r = run('promote', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    const out = r.stdout;
+    assert.match(out, /^# Retry storm on checkout\n\n## Problem/);
+    for (const keep of ['## What done looks like', '## Estimate', '3 story points', 'PR #12, src/a.ts:10', 'the retry note']) assert.ok(out.includes(keep), keep);
+    for (const gone of ['Decisions needed', 'Evidence', '## Links', '## Log', 'zawg', 'secret internal note', 'demo-007', 'demo-001', '[[', 'Internal', '**Status**', 'Decision needed']) {
+        assert.ok(!out.includes(gone), `leaked: ${gone}`);
+    }
+    assert.match(r.stderr, /removed 3 vault reference/);
+});
+
+test('promote is read-only and handles legacy tickets', () => {
+    const { run, file, read } = setup();
+    mkdirSync(dirname(file('demo-900')), { recursive: true });
+    const legacy = '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open` · **Priority** `P2`\n\n#a #b\n\n## Description\n\nbody\n\n## Decision (Jack, 2026-10-01)\n\nship it\n';
+    writeFileSync(file('demo-900'), legacy);
+    const r = run('promote', 'demo-900');
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, '# Old\n\n## Description\n\nbody\n');
+    assert.match(r.stderr, /What done looks like/);
+    assert.equal(read('demo-900'), legacy, 'promote must not write');
+});
