@@ -1,0 +1,84 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'ticket.mjs');
+
+function setup() {
+    const vault = mkdtempSync(join(tmpdir(), 'xenophon-'));
+    const run = (...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8' });
+    const file = (id, archived = false) => join(vault, 'Projects', 'demo', 'Tickets', archived ? 'Archive' : '', `${id}.md`);
+    const read = (id, archived) => readFileSync(file(id, archived), 'utf8');
+    return { vault, run, file, read };
+}
+
+const BASE = ['new', '--title', 'Retry storm on checkout', '--problem', 'Retries fan out.', '--done', 'One retry per request.'];
+
+// ── Template rendering ────────────────────────────────────────────────────────
+test('new renders the template sections in order with defaults', () => {
+    const { run, read } = setup();
+    const r = run(...BASE, '--context', 'Seen in prod.', '--scope', 'cap retries', '--accept', 'unit test', '--out', 'backoff', '--points', '2',
+        '--evidence', 'src/a.ts:10 - loop', '--link', 'PR 12');
+    assert.equal(r.status, 0, r.stderr);
+    const t = read('demo-001');
+    const order = ['## Problem', '## Context', '## Scope', '## What done looks like', '## Acceptance criteria', '## Out of scope',
+        '## Estimate', '## Decisions needed (for Jack)', '## Evidence / file:line', '## Links', '## Log'].map((h) => t.indexOf(h));
+    assert.ok(order.every((i) => i >= 0), `missing section: ${order}`);
+    assert.deepEqual(order, [...order].sort((a, b) => a - b));
+    assert.match(t, /- \[ \] unit test/);
+    assert.match(t, /2 story points/);
+    assert.match(t, /decision_needed: false/);
+    assert.match(t, /\*\*Decision needed\*\* `no` · \*\*Status\*\*/);
+    assert.match(t, /Decisions needed \(for Jack\)\n\n> Internal[^\n]*\n\nNone/);
+    assert.match(t, new RegExp(`- ${new Date().toISOString().slice(0, 10)}: Filed\\.`));
+});
+
+test('--decision renders options, recommendation and stakes and flips the flag', () => {
+    const { run, read } = setup();
+    const r = run(...BASE, '--decision', 'Cap at 3? | 3 or 5 | 3 | pages on-call if wrong');
+    assert.equal(r.status, 0, r.stderr);
+    const t = read('demo-001');
+    assert.match(t, /decision_needed: true/);
+    assert.match(t, /\*\*Decision needed\*\* `yes`/);
+    assert.match(t, /1\. \*\*Cap at 3\?\*\*\n {3}- Options: 3 or 5\n {3}- Recommendation: 3\n {3}- Stakes: pages on-call if wrong/);
+});
+
+test('incomplete --decision, missing --done, bad --points and mixed --body-file are rejected', () => {
+    const { run, vault } = setup();
+    assert.notEqual(run(...BASE, '--decision', 'only | three | parts').status, 0);
+    assert.notEqual(run('new', '--title', 'x', '--problem', 'p').status, 0);
+    assert.notEqual(run(...BASE, '--points', '8').status, 0);
+    assert.notEqual(run(...BASE, '--body-file', '-').status, 0);
+    assert.equal(existsSync(join(vault, 'Projects', 'demo', 'Tickets', 'demo-001.md')), false);
+});
+
+test('--body-file keeps the legacy shape (no template, no decision_needed)', () => {
+    const s = setup();
+    const out = spawnSync('node', [SCRIPT, 'new', '--title', 'Old style', '--body-file', '-', '--vault', s.vault, '--project', 'demo'],
+        { encoding: 'utf8', input: '## Description\n\nhand written\n' });
+    assert.equal(out.status, 0, out.stderr);
+    const t = s.read('demo-001');
+    assert.match(t, /## Description\n\nhand written/);
+    assert.doesNotMatch(t, /decision_needed|Decision needed|## Problem/);
+});
+
+// ── Browsing ──────────────────────────────────────────────────────────────────
+test('list --decisions shows only tickets awaiting a decision; old tickets are unaffected', () => {
+    const { run, file, read } = setup();
+    run(...BASE);
+    run('new', '--title', 'Needs a call', '--problem', 'p', '--done', 'd', '--decision', 'A? | x or y | x | cost');
+    mkdirSync(dirname(file('demo-900')), { recursive: true });
+    writeFileSync(file('demo-900'), '---\nid: "demo-900"\ntitle: "Pre-template"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900\n\n## Description\n\nold\n');
+    const dec = run('list', '--decisions').stdout;
+    assert.match(dec, /demo-002/);
+    assert.doesNotMatch(dec, /demo-001|demo-900/);
+    assert.match(dec, /decision needed/);
+    assert.match(run('list').stdout, /demo-900/);
+    // rewriting an old ticket must not invent decision_needed
+    run('set', 'demo-900', '--priority', '1');
+    assert.doesNotMatch(read('demo-900'), /decision_needed/);
+});

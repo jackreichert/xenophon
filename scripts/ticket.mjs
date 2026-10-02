@@ -6,14 +6,20 @@
  * This script only does the jobs that need consistency: allocating ids,
  * placing files, moving closed tickets to Archive/, and regenerating the index.
  *
- *   ticket.mjs new --title "..." [--type bug] [--priority 2] [--labels a,b]
- *                  [--external jira-X] [--blocked-by id1,id2] [--body-file -]
+ *   ticket.mjs new --title "..." --problem "..." --done "..." [--context "..."]
+ *                  [--scope "..."]... [--accept "..."]... [--out "..."]... [--points 3]
+ *                  [--decision "what | options | recommendation | stakes"]...
+ *                  [--evidence "file:line - note"]... [--link "..."]...
+ *                  [--type bug] [--priority 2] [--labels a,b]
+ *                  [--external jira-X] [--blocked-by id1,id2]
+ *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs close <id> [--reason "..."]
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
  *   ticket.mjs set <id> --reviewed            # stamp today; --reviewed no clears
  *   ticket.mjs list --unreviewed              # what still needs a read
+ *   ticket.mjs list --decisions               # tickets waiting on a decision
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -39,6 +45,14 @@ function arg(name, fallback = null) {
     return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback;
 }
 const has = (name) => argv.includes(`--${name}`);
+/** Every value of a repeatable flag, in order. */
+function args(name) {
+    const out = [];
+    argv.forEach((a, i) => {
+        if (a === `--${name}` && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) out.push(argv[i + 1]);
+    });
+    return out;
+}
 
 const dryRun = has('dry-run');
 const vault = arg('vault', DEFAULT_VAULT);
@@ -107,6 +121,8 @@ function renderFrontmatter(fm) {
         `title: ${yamlStr(fm.title)}`,
         `status: ${yamlStr(fm.status)}`,
         `reviewed: ${fm.reviewed || false}`,
+        // Absent on tickets filed before the template; do not invent it on rewrite.
+        typeof fm.decision_needed === 'boolean' ? `decision_needed: ${fm.decision_needed}` : null,
         `type: ${yamlStr(fm.type)}`,
         `priority: ${fm.priority}`,
         `labels: ${yamlList(fm.labels)}`,
@@ -161,6 +177,88 @@ function readStdin() {
     try { return readFileSync(0, 'utf8'); } catch { return ''; }
 }
 
+// ── Template ──────────────────────────────────────────────────────────────────
+// Public sections mirror a typical tracker ticket (problem, context, scope,
+// done state, acceptance, out of scope, estimate). Internal sections follow and
+// are for the vault reader only.
+const POINT_SCALE = (process.env.XENOPHON_POINTS || '1,2,3,5').split(',').map((n) => Number(n.trim()));
+const DECISION_FIELDS = ['decision', 'options', 'recommendation', 'stakes'];
+
+function templateSpec() {
+    const spec = {
+        problem: arg('problem'),
+        context: arg('context'),
+        scope: args('scope'),
+        done: arg('done'),
+        accept: args('accept'),
+        out: args('out'),
+        points: arg('points'),
+        decisions: args('decision').map(parseDecision),
+        evidence: args('evidence'),
+        links: args('link'),
+    };
+    spec.provided = Boolean(spec.problem || spec.context || spec.done || spec.points || spec.scope.length
+        || spec.accept.length || spec.out.length || spec.decisions.length || spec.evidence.length || spec.links.length);
+    return spec;
+}
+
+/** "decision | options | recommendation | stakes" -> object; all four parts are required. */
+function parseDecision(raw) {
+    const parts = raw.split(/\s+\|\s+/).map((p) => p.trim());
+    if (parts.length !== DECISION_FIELDS.length || parts.some((p) => !p)) {
+        console.error(`--decision needs four parts separated by " | ": ${DECISION_FIELDS.join(' | ')}. Got: ${raw}`);
+        process.exit(1);
+    }
+    return Object.fromEntries(DECISION_FIELDS.map((k, i) => [k, parts[i]]));
+}
+
+function validateSpec(spec) {
+    const missing = [];
+    if (!spec.problem) missing.push('--problem');
+    if (!spec.done) missing.push('--done');
+    if (missing.length) {
+        console.error(`Missing ${missing.join(' and ')}. A ticket needs a problem and a "What done looks like"; ask if the done state is unclear. (Or pass --body-file for a hand-written body.)`);
+        process.exit(1);
+    }
+    if (spec.points !== null) {
+        const n = Number(spec.points);
+        if (!POINT_SCALE.includes(n)) {
+            console.error(`--points must be one of ${POINT_SCALE.join(', ')}; anything bigger should be split into smaller tickets.`);
+            process.exit(1);
+        }
+    }
+}
+
+function renderDecision(n, d) {
+    return [
+        `${n}. **${d.decision}**`,
+        `   - Options: ${d.options}`,
+        `   - Recommendation: ${d.recommendation}`,
+        `   - Stakes: ${d.stakes}`,
+    ].join('\n');
+}
+
+const INTERNAL_NOTE = '> Internal. Stripped by `ticket.mjs promote`.';
+
+function renderTemplate(spec) {
+    const bullets = (a, prefix = '- ') => a.map((x) => `${prefix}${x}`).join('\n');
+    const sections = [
+        ['Problem', spec.problem],
+        spec.context && ['Context', spec.context],
+        spec.scope.length && ['Scope', bullets(spec.scope)],
+        ['What done looks like', spec.done],
+        spec.accept.length && ['Acceptance criteria', bullets(spec.accept, '- [ ] ')],
+        spec.out.length && ['Out of scope', bullets(spec.out)],
+        spec.points !== null && ['Estimate', `${Number(spec.points)} story point${Number(spec.points) === 1 ? '' : 's'}`],
+        ['Decisions needed (for Jack)', `${INTERNAL_NOTE}\n\n${spec.decisions.length
+            ? spec.decisions.map((d, i) => renderDecision(i + 1, d)).join('\n') : 'None'}`],
+        ['Evidence / file:line', spec.evidence.length ? bullets(spec.evidence) : '_None yet_'],
+        ['Links', spec.links.length ? bullets(spec.links) : '_None_'],
+        ['Log', `- ${today()}: Filed.`],
+    ].filter(Boolean);
+    return sections.map(([h, b]) => `## ${h}\n\n${b}`).join('\n\n');
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 function cmdNew() {
     ensureDirs();
@@ -177,13 +275,21 @@ function cmdNew() {
     }
 
     const bodyFile = arg('body-file');
-    const body = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
+    const spec = templateSpec();
+    const legacy = Boolean(bodyFile);
+    if (legacy && spec.provided) {
+        console.error('--body-file replaces the template; do not combine it with --problem/--done/--scope/... flags.');
+        process.exit(1);
+    }
+    if (!legacy) validateSpec(spec);
+    const legacyBody = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
 
     const fm = {
         id: arg('id') || nextId(),
         title,
         status: 'open',
         reviewed: false,
+        ...(legacy ? {} : { decision_needed: spec.decisions.length > 0 }),
         type,
         priority,
         labels: (arg('labels') || '').split(',').map((s) => s.trim()).filter(Boolean),
@@ -195,6 +301,7 @@ function cmdNew() {
 
     const tags = fm.labels.map((l) => `#${l}`).join(' ');
     const meta = [
+        legacy ? null : `**Decision needed** \`${fm.decision_needed ? 'yes' : 'no'}\``,
         `**Status** \`${fm.status}\``,
         `**Priority** \`P${fm.priority}\``,
         `**Type** \`${fm.type}\``,
@@ -202,13 +309,14 @@ function cmdNew() {
         fm.external ? `**External** \`${fm.external}\`` : null,
     ].filter(Boolean).join(' · ');
 
+    const body = legacy ? (legacyBody.trim() || '## Description\n\n_TBD_') : renderTemplate(spec);
     const content = [
         renderFrontmatter(fm), '',
         `# ${fm.id} — ${fm.title}`, '',
         meta,
         tags ? `\n${tags}` : '',
         '',
-        body.trim() || '## Description\n\n_TBD_',
+        body,
         '',
     ].join('\n');
 
@@ -299,6 +407,7 @@ function cmdList() {
         // --ready hides anything still waiting on an unclosed blocker.
         if (has('ready') && (fm['blocked-by'] || []).some((b) => openIds.has(b))) return false;
         if (has('unreviewed') && fm.reviewed) return false;
+        if (has('decisions') && fm.decision_needed !== true) return false;
         return true;
     });
 
@@ -311,6 +420,7 @@ function cmdList() {
         const blockers = (fm['blocked-by'] || []).filter((b) => openIds.has(b));
         console.log(
             `P${fm.priority}  ${String(fm.id).padEnd(20)} [${String(fm.type).padEnd(7)}] ${fm.status.padEnd(11)} ${fm.title}`
+            + (fm.decision_needed === true ? '  ? decision needed' : '')
             + (fm.reviewed ? '' : '  ● unreviewed')
             + (blockers.length ? `  ⛔ blocked by ${blockers.join(', ')}` : '')
         );
@@ -352,6 +462,7 @@ function rebuildIndex() {
             const tags = (fm.labels || []).map((l) => `#${l}`).join(' ');
             const blockers = (fm['blocked-by'] || []).filter((b) => openIds.has(b));
             lines.push(`- [[${fm.id}|${fm.title}]] · \`${fm.type}\` · \`${fm.status}\``
+                + (fm.decision_needed === true ? ' · **decision needed**' : '')
                 + (fm.reviewed ? '' : ' · **unreviewed**')
                 + (tags ? ` · ${tags}` : '')
                 + (blockers.length ? ` · ⛔ ${blockers.map((b) => `[[${b}]]`).join(', ')}` : ''));
