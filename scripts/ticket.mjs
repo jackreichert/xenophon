@@ -73,6 +73,27 @@ function repoName() {
     }
 }
 const project = arg('project', repoName());
+
+/**
+ * Optional settings, in the same shape the-maestro uses: a fenced `xenophon-config`
+ * block of `key: value` lines in a markdown file. Path: $XENOPHON_CONFIG, else
+ * <vault>/xenophon-config.md. Environment variables win over the file.
+ */
+function readConfig() {
+    const path = process.env.XENOPHON_CONFIG || join(vault, 'xenophon-config.md');
+    if (!existsSync(path)) return {};
+    const block = readFileSync(path, 'utf8').match(/```xenophon-config\n([\s\S]*?)```/);
+    const cfg = {};
+    for (const line of (block ? block[1] : '').split('\n')) {
+        const m = line.replace(/\s+#.*$/, '').match(/^\s*([\w-]+)\s*:\s*(.*?)\s*$/);
+        if (m) cfg[m[1]] = m[2];
+    }
+    return cfg;
+}
+const config = readConfig();
+/** Who the Decisions section is addressed to; empty means a generic heading. */
+const DECIDER = (process.env.XENOPHON_DECIDER ?? config.decider ?? '').trim();
+const DECISIONS_TITLE = DECIDER ? `Decisions needed (for ${DECIDER})` : 'Decisions needed';
 const ticketsDir = join(vault, 'Projects', project, 'Tickets');
 const archiveDir = join(ticketsDir, 'Archive');
 
@@ -254,7 +275,7 @@ function renderTemplate(spec) {
         spec.accept.length && ['Acceptance criteria', bullets(spec.accept, '- [ ] ')],
         spec.out.length && ['Out of scope', bullets(spec.out)],
         spec.points !== null && ['Estimate', `${Number(spec.points)} story point${Number(spec.points) === 1 ? '' : 's'}`],
-        ['Decisions needed (for Jack)', `${INTERNAL_NOTE}\n\n${spec.decisions.length
+        [DECISIONS_TITLE, `${INTERNAL_NOTE}\n\n${spec.decisions.length
             ? spec.decisions.map((d, i) => renderDecision(i + 1, d)).join('\n') : 'None'}`],
         ['Evidence / file:line', spec.evidence.length ? bullets(spec.evidence) : '_None yet_'],
         ['Links', spec.links.length ? bullets(spec.links) : '_None_'],
@@ -477,7 +498,7 @@ function cmdDecide() {
         body = joinSections(secs);
     }
     const start = placeholder ? 0 : existing.filter((l) => /^\d+\. \*\*/.test(l)).length;
-    body = appendToSection(body, DECISIONS_HEADING, 'Decisions needed (for Jack)',
+    body = appendToSection(body, DECISIONS_HEADING, DECISIONS_TITLE,
         decisions.map((d, i) => renderDecision(start + i + 1, d)), { intro: [INTERNAL_NOTE] });
     t.frontmatter.decision_needed = true;
     saveTicket(t, syncDecisionHeader(body, true));

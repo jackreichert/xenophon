@@ -10,10 +10,14 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 't
 
 function setup() {
     const vault = mkdtempSync(join(tmpdir(), 'xenophon-'));
-    const run = (...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8' });
+    const clean = { ...process.env };
+    delete clean.XENOPHON_DECIDER;
+    delete clean.XENOPHON_CONFIG;
+    const run = (...a) => runWith({}, ...a);
+    const runWith = (env, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8', env: { ...clean, ...env } });
     const file = (id, archived = false) => join(vault, 'Projects', 'demo', 'Tickets', archived ? 'Archive' : '', `${id}.md`);
     const read = (id, archived) => readFileSync(file(id, archived), 'utf8');
-    return { vault, run, file, read };
+    return { vault, run, runWith, file, read };
 }
 
 const BASE = ['new', '--title', 'Retry storm on checkout', '--problem', 'Retries fan out.', '--done', 'One retry per request.'];
@@ -26,14 +30,14 @@ test('new renders the template sections in order with defaults', () => {
     assert.equal(r.status, 0, r.stderr);
     const t = read('demo-001');
     const order = ['## Problem', '## Context', '## Scope', '## What done looks like', '## Acceptance criteria', '## Out of scope',
-        '## Estimate', '## Decisions needed (for Jack)', '## Evidence / file:line', '## Links', '## Log'].map((h) => t.indexOf(h));
+        '## Estimate', '## Decisions needed', '## Evidence / file:line', '## Links', '## Log'].map((h) => t.indexOf(h));
     assert.ok(order.every((i) => i >= 0), `missing section: ${order}`);
     assert.deepEqual(order, [...order].sort((a, b) => a - b));
     assert.match(t, /- \[ \] unit test/);
     assert.match(t, /2 story points/);
     assert.match(t, /decision_needed: false/);
     assert.match(t, /\*\*Decision needed\*\* `no` · \*\*Status\*\*/);
-    assert.match(t, /Decisions needed \(for Jack\)\n\n> Internal[^\n]*\n\nNone/);
+    assert.match(t, /## Decisions needed\n\n> Internal[^\n]*\n\nNone/);
     assert.match(t, new RegExp(`- ${new Date().toISOString().slice(0, 10)}: Filed\\.`));
 });
 
@@ -149,4 +153,33 @@ test('promote is read-only and handles legacy tickets', () => {
     assert.equal(r.stdout, '# Old\n\n## Description\n\nbody\n');
     assert.match(r.stderr, /What done looks like/);
     assert.equal(read('demo-900'), legacy, 'promote must not write');
+});
+
+// ── Configurable decider ──────────────────────────────────────────────────────
+test('heading is generic by default and takes the decider from env or the config file (env wins)', () => {
+    const { vault, run, runWith, read } = setup();
+    run(...BASE);
+    assert.match(read('demo-001'), /\n## Decisions needed\n/);
+    runWith({ XENOPHON_DECIDER: 'Sam' }, ...BASE);
+    assert.match(read('demo-002'), /\n## Decisions needed \(for Sam\)\n/);
+    writeFileSync(join(vault, 'xenophon-config.md'), '# cfg\n\n```xenophon-config\ndecider: Jack   # comment\n```\n');
+    run(...BASE);
+    assert.match(read('demo-003'), /\n## Decisions needed \(for Jack\)\n/);
+    runWith({ XENOPHON_DECIDER: 'Sam' }, ...BASE);
+    assert.match(read('demo-004'), /\(for Sam\)/);
+    runWith({ XENOPHON_CONFIG: join(vault, 'missing.md') }, ...BASE);
+    assert.match(read('demo-005'), /\n## Decisions needed\n/);
+});
+
+test('decide and promote find the section under any configured name, old "(for Jack)" tickets included', () => {
+    const { run, runWith, read } = setup();
+    runWith({ XENOPHON_DECIDER: 'Jack' }, ...BASE);
+    // config changed since filing: heading on disk no longer matches the configured one
+    assert.equal(runWith({ XENOPHON_DECIDER: 'Sam' }, 'decide', 'demo-001', '--decision', 'Q? | a or b | a | s').status, 0);
+    const t = read('demo-001');
+    assert.equal((t.match(/## Decisions needed/g) || []).length, 1);
+    assert.match(t, /## Decisions needed \(for Jack\)[\s\S]*1\. \*\*Q\?\*\*/);
+    const out = runWith({ XENOPHON_DECIDER: 'Sam' }, 'promote', 'demo-001').stdout;
+    assert.ok(!out.includes('Decisions needed') && !out.includes('Q?'));
+    assert.equal(run('promote', 'demo-001').stdout, out);
 });

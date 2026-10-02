@@ -72,6 +72,7 @@ Field rules:
 
 - `--problem` and `--done` are required. `--scope`, `--accept`, `--out`, `--decision`, `--evidence`, `--link` repeat. Quote every value.
 - `--decision` needs four parts separated by ` | `. With no decisions the section reads `None`. With any, the header shows `Decision needed: yes` and `list --decisions` finds it.
+- The Decisions heading is generic unless a decider is configured (`XENOPHON_DECIDER` or `xenophon-config.md` in the vault); see the README.
 - `--points` must be on the scale (`1,2,3,5`, or `XENOPHON_POINTS`). Anything bigger should be split.
 - `--type` — `bug`, `task`, `feature`, `epic`, `chore`
 - `--priority` — integer `0`–`4` (0 critical, 2 normal, 4 backlog). Words are rejected.

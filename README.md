@@ -130,7 +130,7 @@ node ~/.claude/skills/xenophon/scripts/ticket.mjs new \
 ## Out of scope
 ## Estimate
 
-## Decisions needed (for Jack)   <- internal from here down
+## Decisions needed              <- internal from here down
 ## Evidence / file:line
 ## Links
 ## Log
@@ -232,6 +232,21 @@ node $T new --title "..." --vault /path/to/other/vault --project some-other-repo
 - Ticket ids (`billing-api-014`) are not issue-tracker keys. If a repo requires a tracker key in branch names, ask for that key. Do not substitute a vault id.
 - Record what was actually verified. A ticket that overstates its evidence costs more than no ticket.
 - Do not commit or push the vault unless you mean to. This skill only writes markdown under `Projects/<project>/Tickets/`.
+
+## Configuration
+
+The Decisions heading is generic (`Decisions needed`). To address it to someone, set the decider; the heading becomes `Decisions needed (for <name>)`. Either:
+
+- environment variable `XENOPHON_DECIDER=Sam`, or
+- a fenced block in `<vault>/xenophon-config.md` (or the file named by `XENOPHON_CONFIG`), one `key: value` per line:
+
+````markdown
+```xenophon-config
+decider: Sam
+```
+````
+
+The environment wins over the file. `decide` and `promote` match the heading by its `Decisions needed` prefix, so tickets filed under a different decider, or none, keep working.
 
 ## Tests
 
