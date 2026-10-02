@@ -94,33 +94,61 @@ Check first. Do not file a second copy of something already tracked.
 node ~/.claude/skills/xenophon/scripts/ticket.mjs list --status all --project billing-api
 ```
 
-Then create one. A ticket is only worth filing if someone else could act on it: symptom, scope, how you will know it is done, and what you already ruled out.
+Then create one. A ticket is only worth filing if someone else could act on it: the problem, how you will know it is done, and what you already ruled out. Pass those as flags and the script lays out the template, so nobody hand-writes markdown.
 
 ```bash
 node ~/.claude/skills/xenophon/scripts/ticket.mjs new \
   --project billing-api \
   --title "Checkout hides the compliance tab for readers" \
-  --type bug \
-  --priority 1 \
-  --labels permissions \
-  --external tracker-1234 \
-  --body-file - <<'BODY'
-## Symptom
-...
-
-## Steps to Reproduce
-...
-
-## Expected vs Actual
-...
-
-## Acceptance Criteria
-...
-
-## Ruled out, with evidence
-...
-BODY
+  --type bug --priority 1 --labels permissions --external tracker-1234 \
+  --problem "Readers lose the compliance tab after login." \
+  --context "Started after the role refactor." \
+  --scope "Check role mapping in the tab guard" \
+  --done "Readers see the compliance tab; no other role changes." \
+  --accept "Test covers reader, editor and admin" \
+  --out "Redesigning the permission model" \
+  --points 2 \
+  --decision "Backfill existing sessions? | yes or let them expire | let them expire | stale tabs for 24h" \
+  --evidence "src/guard.ts:42 - reader falls through to deny" \
+  --link "PR 118"
 ```
+
+`--problem` and `--done` are required. `--decision` is repeatable and needs four parts separated by ` | `: the decision, the options, a recommendation, the stakes. `--scope`, `--accept`, `--out`, `--evidence` and `--link` are repeatable too. `--points` must be on the scale (`1,2,3,5` by default; set `XENOPHON_POINTS=1,2,3,5,8` to change it).
+
+## The template
+
+```markdown
+# {id} — {title}
+
+**Decision needed** `yes|no` · **Status** ... · **Priority** ... · **Reviewed** ...
+
+## Problem
+## Context
+## Scope
+## What done looks like
+## Acceptance criteria
+## Out of scope
+## Estimate
+
+## Decisions needed (for Jack)   <- internal from here down
+## Evidence / file:line
+## Links
+## Log
+```
+
+The sections down to Estimate mirror a typical tracker ticket. The last four are internal: they are for the vault reader and are stripped on promotion. Nothing tracker-specific is built in. `Context`, `Scope`, `Acceptance criteria`, `Out of scope` and `Estimate` appear only when given.
+
+Tickets filed with `--body-file -` (a hand-written body) still work and keep their old shape; that flag cannot be combined with the template flags.
+
+```bash
+node $T decide billing-api-001 --decision "what | options | recommendation | stakes"
+node $T decide billing-api-001 --clear               # decision made; the record stays
+node $T log billing-api-001 "Reproduced on staging"  # dated line in ## Log
+node $T promote billing-api-001                      # print tracker-ready markdown
+node $T list --decisions --project billing-api       # tickets waiting on a decision
+```
+
+`promote` only prints. It drops the internal sections, strips wiki-links, `obsidian://` URIs and the ids of any project in your vault, and warns on stderr about what it removed so you can re-read for dangling sentences. It does not call a tracker and does not touch the ticket. Re-read the output before filing it.
 
 The new id prints on the last line, as `{project}-NNN`.
 
@@ -131,7 +159,7 @@ Field rules:
 | `--type` | `bug`, `task`, `feature`, `epic`, `chore` |
 | `--priority` | Integer `0`–`4`. `0` is critical, `2` is normal, `4` is backlog. Words are rejected. |
 | `--labels`, `--blocked-by` | Comma-separated, no spaces around the commas. |
-| `--body-file -` | Read the body from stdin. Use a heredoc; inline strings get mangled by the shell. |
+| `--body-file -` | Legacy: read a hand-written body from stdin instead of using the template flags. |
 | `--id` | Only to deliberately reuse an id. Otherwise it is allocated. |
 | `--external` | A pointer to Jira or another tracker. This skill does not sync with it. |
 
@@ -181,6 +209,7 @@ labels: [permissions]
 blocked-by: []
 external: ""
 reviewed: false
+decision_needed: false   # written by the template; absent on older tickets
 created: 2026-09-22
 ---
 ```
@@ -204,8 +233,14 @@ node $T new --title "..." --vault /path/to/other/vault --project some-other-repo
 - Record what was actually verified. A ticket that overstates its evidence costs more than no ticket.
 - Do not commit or push the vault unless you mean to. This skill only writes markdown under `Projects/<project>/Tickets/`.
 
+## Tests
+
+```bash
+node --test test/*.test.mjs
+```
+
 ## Sharing
 
-This folder is the shareable unit: `SKILL.md`, `scripts/ticket.mjs`, and this README.
+This folder is the shareable unit: `SKILL.md`, `scripts/ticket.mjs`, `test/`, and this README.
 
 Do not put a vault, sample tickets with real findings, or anything under `Projects/` into the skill repo. Recipients point the script at their own vault.
