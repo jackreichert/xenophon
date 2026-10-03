@@ -6,14 +6,24 @@
  * This script only does the jobs that need consistency: allocating ids,
  * placing files, moving closed tickets to Archive/, and regenerating the index.
  *
- *   ticket.mjs new --title "..." [--type bug] [--priority 2] [--labels a,b]
- *                  [--external jira-X] [--blocked-by id1,id2] [--body-file -]
+ *   ticket.mjs new --title "..." --problem "..." --done "..." [--context "..."]
+ *                  [--scope "..."]... [--accept "..."]... [--out "..."]... [--points 3]
+ *                  [--decision "what | options | recommendation | stakes"]...
+ *                  [--evidence "file:line - note"]... [--link "..."]...
+ *                  [--type bug] [--priority 2] [--labels a,b]
+ *                  [--external jira-X] [--blocked-by id1,id2]
+ *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
+ *   ticket.mjs decide <id> --decision "what | options | recommendation | stakes"
+ *   ticket.mjs decide <id> --clear            # decision made; stops listing as needed
+ *   ticket.mjs log <id> "dated update"
+ *   ticket.mjs promote <id>                   # print tracker-ready markdown; calls nothing
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs close <id> [--reason "..."]
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
  *   ticket.mjs set <id> --reviewed            # stamp today; --reviewed no clears
  *   ticket.mjs list --unreviewed              # what still needs a read
+ *   ticket.mjs list --decisions               # tickets waiting on a decision
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -39,6 +49,14 @@ function arg(name, fallback = null) {
     return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback;
 }
 const has = (name) => argv.includes(`--${name}`);
+/** Every value of a repeatable flag, in order. */
+function args(name) {
+    const out = [];
+    argv.forEach((a, i) => {
+        if (a === `--${name}` && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) out.push(argv[i + 1]);
+    });
+    return out;
+}
 
 const dryRun = has('dry-run');
 const vault = arg('vault', DEFAULT_VAULT);
@@ -55,6 +73,27 @@ function repoName() {
     }
 }
 const project = arg('project', repoName());
+
+/**
+ * Optional settings, in the same shape the-maestro uses: a fenced `xenophon-config`
+ * block of `key: value` lines in a markdown file. Path: $XENOPHON_CONFIG, else
+ * <vault>/xenophon-config.md. Environment variables win over the file.
+ */
+function readConfig() {
+    const path = process.env.XENOPHON_CONFIG || join(vault, 'xenophon-config.md');
+    if (!existsSync(path)) return {};
+    const block = readFileSync(path, 'utf8').match(/```xenophon-config\n([\s\S]*?)```/);
+    const cfg = {};
+    for (const line of (block ? block[1] : '').split('\n')) {
+        const m = line.replace(/\s+#.*$/, '').match(/^\s*([\w-]+)\s*:\s*(.*?)\s*$/);
+        if (m) cfg[m[1]] = m[2];
+    }
+    return cfg;
+}
+const config = readConfig();
+/** Who the Decisions section is addressed to; empty means a generic heading. */
+const DECIDER = (process.env.XENOPHON_DECIDER ?? config.decider ?? '').trim();
+const DECISIONS_TITLE = DECIDER ? `Decisions needed (for ${DECIDER})` : 'Decisions needed';
 const ticketsDir = join(vault, 'Projects', project, 'Tickets');
 const archiveDir = join(ticketsDir, 'Archive');
 
@@ -107,6 +146,8 @@ function renderFrontmatter(fm) {
         `title: ${yamlStr(fm.title)}`,
         `status: ${yamlStr(fm.status)}`,
         `reviewed: ${fm.reviewed || false}`,
+        // Absent on tickets filed before the template; do not invent it on rewrite.
+        typeof fm.decision_needed === 'boolean' ? `decision_needed: ${fm.decision_needed}` : null,
         `type: ${yamlStr(fm.type)}`,
         `priority: ${fm.priority}`,
         `labels: ${yamlList(fm.labels)}`,
@@ -161,6 +202,148 @@ function readStdin() {
     try { return readFileSync(0, 'utf8'); } catch { return ''; }
 }
 
+// ── Template ──────────────────────────────────────────────────────────────────
+// Public sections mirror a typical tracker ticket (problem, context, scope,
+// done state, acceptance, out of scope, estimate). Internal sections follow and
+// are for the vault reader only.
+const POINT_SCALE = (process.env.XENOPHON_POINTS || '1,2,3,5').split(',').map((n) => Number(n.trim()));
+const DECISION_FIELDS = ['decision', 'options', 'recommendation', 'stakes'];
+
+function templateSpec() {
+    const spec = {
+        problem: arg('problem'),
+        context: arg('context'),
+        scope: args('scope'),
+        done: arg('done'),
+        accept: args('accept'),
+        out: args('out'),
+        points: arg('points'),
+        decisions: args('decision').map(parseDecision),
+        evidence: args('evidence'),
+        links: args('link'),
+    };
+    spec.provided = Boolean(spec.problem || spec.context || spec.done || spec.points || spec.scope.length
+        || spec.accept.length || spec.out.length || spec.decisions.length || spec.evidence.length || spec.links.length);
+    return spec;
+}
+
+/** "decision | options | recommendation | stakes" -> object; all four parts are required. */
+function parseDecision(raw) {
+    const parts = raw.split(/\s+\|\s+/).map((p) => p.trim());
+    if (parts.length !== DECISION_FIELDS.length || parts.some((p) => !p)) {
+        console.error(`--decision needs four parts separated by " | ": ${DECISION_FIELDS.join(' | ')}. Got: ${raw}`);
+        process.exit(1);
+    }
+    return Object.fromEntries(DECISION_FIELDS.map((k, i) => [k, parts[i]]));
+}
+
+function validateSpec(spec) {
+    const missing = [];
+    if (!spec.problem) missing.push('--problem');
+    if (!spec.done) missing.push('--done');
+    if (missing.length) {
+        console.error(`Missing ${missing.join(' and ')}. A ticket needs a problem and a "What done looks like"; ask if the done state is unclear. (Or pass --body-file for a hand-written body.)`);
+        process.exit(1);
+    }
+    if (spec.points !== null) {
+        const n = Number(spec.points);
+        if (!POINT_SCALE.includes(n)) {
+            console.error(`--points must be one of ${POINT_SCALE.join(', ')}; anything bigger should be split into smaller tickets.`);
+            process.exit(1);
+        }
+    }
+}
+
+function renderDecision(n, d) {
+    return [
+        `${n}. **${d.decision}**`,
+        `   - Options: ${d.options}`,
+        `   - Recommendation: ${d.recommendation}`,
+        `   - Stakes: ${d.stakes}`,
+    ].join('\n');
+}
+
+const INTERNAL_NOTE = '> Internal. Stripped by `ticket.mjs promote`.';
+
+function renderTemplate(spec) {
+    const bullets = (a, prefix = '- ') => a.map((x) => `${prefix}${x}`).join('\n');
+    const sections = [
+        ['Problem', spec.problem],
+        spec.context && ['Context', spec.context],
+        spec.scope.length && ['Scope', bullets(spec.scope)],
+        ['What done looks like', spec.done],
+        spec.accept.length && ['Acceptance criteria', bullets(spec.accept, '- [ ] ')],
+        spec.out.length && ['Out of scope', bullets(spec.out)],
+        spec.points !== null && ['Estimate', `${Number(spec.points)} story point${Number(spec.points) === 1 ? '' : 's'}`],
+        [DECISIONS_TITLE, `${INTERNAL_NOTE}\n\n${spec.decisions.length
+            ? spec.decisions.map((d, i) => renderDecision(i + 1, d)).join('\n') : 'None'}`],
+        ['Evidence / file:line', spec.evidence.length ? bullets(spec.evidence) : '_None yet_'],
+        ['Links', spec.links.length ? bullets(spec.links) : '_None_'],
+        ['Log', `- ${today()}: Filed.`],
+    ].filter(Boolean);
+    return sections.map(([h, b]) => `## ${h}\n\n${b}`).join('\n\n');
+}
+
+// ── Sections ──────────────────────────────────────────────────────────────────
+/** Split a body into H2 sections; sections[0] is the preamble. Fence-aware. */
+function splitSections(body) {
+    const secs = [{ heading: null, line: null, lines: [] }];
+    let fence = false;
+    for (const l of body.split('\n')) {
+        if (/^(```|~~~)/.test(l)) fence = !fence;
+        const m = !fence && l.match(/^##\s+(.*\S)\s*$/);
+        if (m) secs.push({ heading: m[1], line: l, lines: [] });
+        else secs.at(-1).lines.push(l);
+    }
+    return secs;
+}
+const joinSections = (secs) => `${secs.flatMap((x) => (x.line === null ? x.lines : [x.line, ...x.lines])).join('\n').trimEnd()}\n`;
+
+/**
+ * The only headings `promote` lets out of the vault (allowlist; anything else is dropped).
+ * "Description" is the legacy hand-written body heading.
+ */
+const PUBLIC_HEADING = /^(problem|context|scope|what done looks like|acceptance criteria|out of scope|estimate|description)\s*$/i;
+const DECISIONS_HEADING = /^decisions needed/i;
+
+function trimBlankEnd(lines) {
+    while (lines.length && !lines.at(-1).trim()) lines.pop();
+    return lines;
+}
+
+/** Append lines to the first section matching `re`, creating `newHeading` (before any internal tail) if absent. */
+function appendToSection(body, re, newHeading, add, { intro = [] } = {}) {
+    const secs = splitSections(body);
+    let sec = secs.find((x) => x.heading && re.test(x.heading));
+    if (!sec) {
+        sec = { heading: newHeading, line: `## ${newHeading}`, lines: ['', ...intro, ...(intro.length ? [''] : [])] };
+        const tail = secs.findIndex((x) => x.heading && /^(evidence|links?\b|log\b)/i.test(x.heading));
+        secs.splice(tail === -1 ? secs.length : tail, 0, sec);
+    }
+    trimBlankEnd(sec.lines);
+    if (!sec.lines.length || sec.lines[0].trim()) sec.lines.unshift('');
+    sec.lines.push(...add, '');
+    return joinSections(secs);
+}
+
+/** Keep the one-line header (`**Decision needed** ...`) in step with the frontmatter. */
+function syncDecisionHeader(body, needed) {
+    const seg = `**Decision needed** \`${needed ? 'yes' : 'no'}\``;
+    const lines = body.split('\n');
+    const end = lines.findIndex((l) => /^##\s/.test(l));
+    const head = lines.slice(0, end === -1 ? lines.length : end);
+    let i = head.findIndex((l) => l.startsWith('**Decision needed**'));
+    if (i !== -1) lines[i] = lines[i].replace(/\*\*Decision needed\*\* `[^`]*`/, seg);
+    else if ((i = head.findIndex((l) => l.startsWith('**Status**'))) !== -1) lines[i] = `${seg} · ${lines[i]}`;
+    return lines.join('\n');
+}
+
+function saveTicket(t, body) {
+    t.frontmatter.updated = today();
+    console.log(`${writeFile(t.path, `${renderFrontmatter(t.frontmatter)}\n${body}`)}  ${t.path}`);
+    rebuildIndex();
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 function cmdNew() {
     ensureDirs();
@@ -177,13 +360,21 @@ function cmdNew() {
     }
 
     const bodyFile = arg('body-file');
-    const body = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
+    const spec = templateSpec();
+    const legacy = Boolean(bodyFile);
+    if (legacy && spec.provided) {
+        console.error('--body-file replaces the template; do not combine it with --problem/--done/--scope/... flags.');
+        process.exit(1);
+    }
+    if (!legacy) validateSpec(spec);
+    const legacyBody = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
 
     const fm = {
         id: arg('id') || nextId(),
         title,
         status: 'open',
         reviewed: false,
+        ...(legacy ? {} : { decision_needed: spec.decisions.length > 0 }),
         type,
         priority,
         labels: (arg('labels') || '').split(',').map((s) => s.trim()).filter(Boolean),
@@ -195,6 +386,7 @@ function cmdNew() {
 
     const tags = fm.labels.map((l) => `#${l}`).join(' ');
     const meta = [
+        legacy ? null : `**Decision needed** \`${fm.decision_needed ? 'yes' : 'no'}\``,
         `**Status** \`${fm.status}\``,
         `**Priority** \`P${fm.priority}\``,
         `**Type** \`${fm.type}\``,
@@ -202,13 +394,14 @@ function cmdNew() {
         fm.external ? `**External** \`${fm.external}\`` : null,
     ].filter(Boolean).join(' · ');
 
+    const body = legacy ? (legacyBody.trim() || '## Description\n\n_TBD_') : renderTemplate(spec);
     const content = [
         renderFrontmatter(fm), '',
         `# ${fm.id} — ${fm.title}`, '',
         meta,
         tags ? `\n${tags}` : '',
         '',
-        body.trim() || '## Description\n\n_TBD_',
+        body,
         '',
     ].join('\n');
 
@@ -283,6 +476,81 @@ function cmdSet() {
     rebuildIndex();
 }
 
+function cmdDecide() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs decide <id> --decision "what | options | recommendation | stakes" | --clear'); process.exit(1); }
+    const t = findTicket(id);
+    let body = t.body;
+
+    if (has('clear')) {
+        t.frontmatter.decision_needed = false;
+        body = syncDecisionHeader(body, false);
+        saveTicket(t, body);
+        return;
+    }
+
+    const decisions = args('decision').map(parseDecision);
+    if (!decisions.length) { console.error('Pass --decision "what | options | recommendation | stakes" or --clear.'); process.exit(1); }
+
+    const secs = splitSections(body);
+    const sec = secs.find((x) => x.heading && DECISIONS_HEADING.test(x.heading));
+    const existing = sec ? sec.lines.filter((l) => l.trim() && !l.startsWith('> Internal')) : [];
+    const placeholder = existing.length === 1 && /^none\.?$/i.test(existing[0].trim());
+    if (placeholder) {
+        sec.lines = ['', INTERNAL_NOTE, ''];
+        body = joinSections(secs);
+    }
+    const start = placeholder ? 0 : existing.filter((l) => /^\d+\. \*\*/.test(l)).length;
+    body = appendToSection(body, DECISIONS_HEADING, DECISIONS_TITLE,
+        decisions.map((d, i) => renderDecision(start + i + 1, d)), { intro: [INTERNAL_NOTE] });
+    t.frontmatter.decision_needed = true;
+    saveTicket(t, syncDecisionHeader(body, true));
+}
+
+function cmdLog() {
+    const [id, ...rest] = positional;
+    const msg = rest.join(' ').trim();
+    if (!id || !msg) { console.error('Usage: ticket.mjs log <id> "update"'); process.exit(1); }
+    const t = findTicket(id);
+    saveTicket(t, appendToSection(t.body, /^log\b/i, 'Log', [`- ${today()}: ${msg}`]));
+}
+
+/** Print tracker-ready markdown: internal sections dropped, vault references stripped. Never calls a tracker. */
+function cmdPromote() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs promote <id>'); process.exit(1); }
+    const t = findTicket(id);
+    const [pre, ...secs] = splitSections(t.body);
+
+    // The preamble (id, status line, labels) is internal metadata; only the title is emitted.
+    const kept = secs.filter((x) => PUBLIC_HEADING.test(x.heading));
+    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal)/i.test(x.heading));
+    if (dropped.length) console.error(`warning: dropped non-public section(s): ${dropped.map((x) => x.heading).join(', ')}.`);
+    if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
+        console.error('warning: no "What done looks like" section; add one before filing.');
+    }
+
+    const projects = existsSync(join(vault, 'Projects')) ? readdirSync(join(vault, 'Projects')) : [];
+    const idRe = projects.length
+        ? new RegExp(`\\b(?:${projects.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})-\\d+\\b`, 'g')
+        : null;
+    let removed = 0;
+    const strip = (text) => {
+        const bump = (r) => { removed += 1; return r; };
+        let out = text.replace(/\[([^\]]*)\]\(obsidian:\/\/[^)\s]*\)/g, (_, label) => bump(label))
+            .replace(/!?\[\[([^\]|]*)\|([^\]]*)\]\]/g, (m, _t, alias) => bump(m.startsWith('!') ? '' : alias))
+            .replace(/!?\[\[[^\]]*\]\]/g, () => bump(''))
+            .replace(/obsidian:\/\/\S+/g, () => bump(''));
+        if (idRe) out = out.replace(idRe, () => bump(''));
+        return out;
+    };
+
+    const text = strip([`# ${t.frontmatter.title}`, '', ...kept.flatMap((x) => [x.line, ...x.lines])].join('\n'))
+        .replace(/\n{3,}/g, '\n\n');
+    if (removed) console.error(`warning: removed ${removed} vault reference(s); re-read the output for dangling sentences.`);
+    process.stdout.write(`${text.trimEnd()}\n`);
+}
+
 function cmdList() {
     // Default view is "active work": everything not closed. Filtering on the
     // literal string 'open' would hide a ticket the moment it went in-progress.
@@ -299,6 +567,7 @@ function cmdList() {
         // --ready hides anything still waiting on an unclosed blocker.
         if (has('ready') && (fm['blocked-by'] || []).some((b) => openIds.has(b))) return false;
         if (has('unreviewed') && fm.reviewed) return false;
+        if (has('decisions') && fm.decision_needed !== true) return false;
         return true;
     });
 
@@ -311,6 +580,7 @@ function cmdList() {
         const blockers = (fm['blocked-by'] || []).filter((b) => openIds.has(b));
         console.log(
             `P${fm.priority}  ${String(fm.id).padEnd(20)} [${String(fm.type).padEnd(7)}] ${fm.status.padEnd(11)} ${fm.title}`
+            + (fm.decision_needed === true ? '  ? decision needed' : '')
             + (fm.reviewed ? '' : '  ● unreviewed')
             + (blockers.length ? `  ⛔ blocked by ${blockers.join(', ')}` : '')
         );
@@ -352,6 +622,7 @@ function rebuildIndex() {
             const tags = (fm.labels || []).map((l) => `#${l}`).join(' ');
             const blockers = (fm['blocked-by'] || []).filter((b) => openIds.has(b));
             lines.push(`- [[${fm.id}|${fm.title}]] · \`${fm.type}\` · \`${fm.status}\``
+                + (fm.decision_needed === true ? ' · **decision needed**' : '')
                 + (fm.reviewed ? '' : ' · **unreviewed**')
                 + (tags ? ` · ${tags}` : '')
                 + (blockers.length ? ` · ⛔ ${blockers.map((b) => `[[${b}]]`).join(', ')}` : ''));
@@ -369,9 +640,9 @@ function rebuildIndex() {
     console.log(`${writeFile(path, lines.join('\n'))}  ${path}`);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|decide|log|promote|index> [...]`);
     process.exit(1);
 }
 commands[cmd]();
