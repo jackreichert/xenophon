@@ -537,8 +537,9 @@ function cmdPromote() {
     let removed = 0;
     const strip = (text) => {
         const bump = (r) => { removed += 1; return r; };
-        let out = text.replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, (_, _t, alias) => bump(alias))
-            .replace(/\[\[[^\]]*\]\]/g, () => bump(''))
+        let out = text.replace(/\[([^\]]*)\]\(obsidian:\/\/[^)\s]*\)/g, (_, label) => bump(label))
+            .replace(/!?\[\[([^\]|]*)\|([^\]]*)\]\]/g, (m, _t, alias) => bump(m.startsWith('!') ? '' : alias))
+            .replace(/!?\[\[[^\]]*\]\]/g, () => bump(''))
             .replace(/obsidian:\/\/\S+/g, () => bump(''));
         if (idRe) out = out.replace(idRe, () => bump(''));
         return out;

@@ -166,6 +166,15 @@ test('promote emits only allowlisted headings and only the title from the preamb
     assert.match(r.stderr, /dropped non-public section\(s\): Related notes/);
 });
 
+test('promote strips embeds without a stray "!" and keeps the label of obsidian:// links', () => {
+    const { run, file } = setup();
+    mkdirSync(dirname(file('demo-902')), { recursive: true });
+    writeFileSync(file('demo-902'), '---\nid: "demo-902"\ntitle: "T"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-902 — T\n\n## Problem\n\nSee ![[shot.png]] and [the note](obsidian://open?vault=v&file=n) then [[a]].\n');
+    const r = run('promote', 'demo-902');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '# T\n\n## Problem\n\nSee  and the note then .\n');
+});
+
 // ── Configurable decider ──────────────────────────────────────────────────────
 test('heading is generic by default and takes the decider from env or the config file (env wins)', () => {
     const { vault, run, runWith, read } = setup();
