@@ -299,8 +299,11 @@ function splitSections(body) {
 }
 const joinSections = (secs) => `${secs.flatMap((x) => (x.line === null ? x.lines : [x.line, ...x.lines])).join('\n').trimEnd()}\n`;
 
-/** Headings that never leave the vault. Matched by prefix so older shapes ("Decision (...)") count too. */
-const INTERNAL_HEADING = /^(decisions? needed|decision\b|evidence|links?\b|log\b|resolution|internal)/i;
+/**
+ * The only headings `promote` lets out of the vault (allowlist; anything else is dropped).
+ * "Description" is the legacy hand-written body heading.
+ */
+const PUBLIC_HEADING = /^(problem|context|scope|what done looks like|acceptance criteria|out of scope|estimate|description)\s*$/i;
 const DECISIONS_HEADING = /^decisions needed/i;
 
 function trimBlankEnd(lines) {
@@ -519,8 +522,10 @@ function cmdPromote() {
     const t = findTicket(id);
     const [pre, ...secs] = splitSections(t.body);
 
-    const stray = pre.lines.filter((l) => l.trim() && !/^#\s/.test(l) && !l.startsWith('**Status**') && !l.startsWith('**Decision needed**') && !/^(#[\w-]+\s*)+$/.test(l.trim()));
-    const kept = secs.filter((x) => !INTERNAL_HEADING.test(x.heading));
+    // The preamble (id, status line, labels) is internal metadata; only the title is emitted.
+    const kept = secs.filter((x) => PUBLIC_HEADING.test(x.heading));
+    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal)/i.test(x.heading));
+    if (dropped.length) console.error(`warning: dropped non-public section(s): ${dropped.map((x) => x.heading).join(', ')}.`);
     if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
         console.error('warning: no "What done looks like" section; add one before filing.');
     }
@@ -539,7 +544,7 @@ function cmdPromote() {
         return out;
     };
 
-    const text = strip([`# ${t.frontmatter.title}`, '', ...stray, ...kept.flatMap((x) => [x.line, ...x.lines])].join('\n'))
+    const text = strip([`# ${t.frontmatter.title}`, '', ...kept.flatMap((x) => [x.line, ...x.lines])].join('\n'))
         .replace(/\n{3,}/g, '\n\n');
     if (removed) console.error(`warning: removed ${removed} vault reference(s); re-read the output for dangling sentences.`);
     process.stdout.write(`${text.trimEnd()}\n`);

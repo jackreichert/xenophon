@@ -148,7 +148,7 @@ node $T promote billing-api-001                      # print tracker-ready markd
 node $T list --decisions --project billing-api       # tickets waiting on a decision
 ```
 
-`promote` only prints. It drops the internal sections, strips wiki-links, `obsidian://` URIs and the ids of any project in your vault, and warns on stderr about what it removed so you can re-read for dangling sentences. It does not call a tracker and does not touch the ticket. Re-read the output before filing it.
+`promote` only prints. It keeps only the public sections (Problem, Context, Scope, What done looks like, Acceptance criteria, Out of scope, Estimate; anything else is dropped, with a warning for unrecognised headings), emits only the title from the header block, strips wiki-links, `obsidian://` URIs and the ids of any project in your vault, and warns on stderr about what it removed so you can re-read for dangling sentences. It does not call a tracker and does not touch the ticket. Re-read the output before filing it.
 
 The new id prints on the last line, as `{project}-NNN`.
 

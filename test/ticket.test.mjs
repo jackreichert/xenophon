@@ -155,6 +155,17 @@ test('promote is read-only and handles legacy tickets', () => {
     assert.equal(read('demo-900'), legacy, 'promote must not write');
 });
 
+test('promote emits only allowlisted headings and only the title from the preamble', () => {
+    const { run, file } = setup();
+    mkdirSync(dirname(file('demo-901')), { recursive: true });
+    const body = '---\nid: "demo-901"\ntitle: "T"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: ["area/x"]\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-901 — T\n\n**Status** `open`\n\n#area/x #v1.2\n\n## Problem\n\np\n\n## What done looks like\n\nd\n\n## Decisions made\n\nsecret choice\n\n## Related notes\n\nprivate\n\n## Log\n\n- x\n';
+    writeFileSync(file('demo-901'), body);
+    const r = run('promote', 'demo-901');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '# T\n\n## Problem\n\np\n\n## What done looks like\n\nd\n');
+    assert.match(r.stderr, /dropped non-public section\(s\): Related notes/);
+});
+
 // ── Configurable decider ──────────────────────────────────────────────────────
 test('heading is generic by default and takes the decider from env or the config file (env wins)', () => {
     const { vault, run, runWith, read } = setup();
