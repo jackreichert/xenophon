@@ -248,6 +248,18 @@ decider: Sam
 
 The environment wins over the file. `decide` and `promote` match the heading by its `Decisions needed` prefix, so tickets filed under a different decider, or none, keep working.
 
+### Session-start update check
+
+`scripts/update-check.mjs` fetches this skill's own repo and prints one line when the checkout is not current (`xenophon: 7 behind origin/main; auto_pull off`, `diverged from ...`, `... ahead of ...`, `...; uncommitted changes`). It prints nothing when current, and says so on one line if it cannot fetch or has no upstream. Untracked files are ignored; tracked edits count as dirty.
+
+The config key `auto_pull` (default off) lets it act. When on, a clean checkout that is purely behind is fast-forwarded with `git merge --ff-only`; anything else (dirty, ahead, diverged) is only reported. It never rebases, resets or creates a merge commit.
+
+```xenophon-config
+auto_pull: true
+```
+
+Put that in the same `xenophon-config` block as `decider`. `XENOPHON_AUTO_PULL=true|false` overrides the file. The file is found through `XENOPHON_CONFIG` or `<VAULT_ROOT>/xenophon-config.md`; with neither, `auto_pull` is off.
+
 ## Tests
 
 ```bash
@@ -256,6 +268,6 @@ node --test test/*.test.mjs
 
 ## Sharing
 
-This folder is the shareable unit: `SKILL.md`, `scripts/ticket.mjs`, `test/`, and this README.
+This folder is the shareable unit: `SKILL.md`, `scripts/` (`ticket.mjs`, `config.mjs`, `update-check.mjs`), `test/`, and this README.
 
 Do not put a vault, sample tickets with real findings, or anything under `Projects/` into the skill repo. Recipients point the script at their own vault.
