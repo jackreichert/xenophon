@@ -163,6 +163,8 @@ Field rules:
 | `--id` | Only to deliberately reuse an id. Otherwise it is allocated. |
 | `--external` | A pointer to Jira or another tracker. This skill does not sync with it. |
 
+`--body-file` is the only body flag. Every subcommand rejects a flag it does not take (for example `--body`) with `unknown flag --body for 'new' (did you mean --body-file?)`, exits non-zero and writes nothing.
+
 ## Updating and browsing
 
 Edit the body in Obsidian or any editor. Use the script for frontmatter and file placement.
