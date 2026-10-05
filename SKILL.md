@@ -79,6 +79,7 @@ Field rules:
 - `--labels`, `--blocked-by` — comma-separated, no spaces around the commas
 - The id is allocated automatically as `{project}-NNN`. Pass `--id` only to deliberately reuse one.
 - `--body-file -` is the legacy hand-written path (cannot be mixed with the template flags). Use it only for content that does not fit the template.
+- `--body-file` is the only body flag. An unknown flag (e.g. `--body`) exits non-zero before anything is written; a typo no longer files a `_TBD_` ticket.
 
 The command prints the new id on its last line.
 

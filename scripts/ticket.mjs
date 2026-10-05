@@ -640,9 +640,52 @@ function rebuildIndex() {
     console.log(`${writeFile(path, lines.join('\n'))}  ${path}`);
 }
 
+const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
+const FLAGS = {
+    new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
+        'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id'],
+    list: ['status', 'ready', 'label', 'unreviewed', 'decisions'],
+    close: ['reason'],
+    reopen: [],
+    set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status'],
+    decide: ['decision', 'clear'],
+    log: [],
+    promote: [],
+    index: [],
+};
+
+/** Edit distance, for the "did you mean" hint only. */
+function distance(a, b) {
+    const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+        let prev = row[0];
+        row[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+            const tmp = row[j];
+            row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+            prev = tmp;
+        }
+    }
+    return row[b.length];
+}
+
+/** Exit non-zero on any flag the command does not take, before anything is written. */
+function rejectUnknownFlags(command) {
+    const allowed = [...FLAGS[command], ...COMMON_FLAGS];
+    const unknown = argv.slice(1).filter((a) => a.startsWith('--') && !allowed.includes(a.slice(2)));
+    if (!unknown.length) return;
+    for (const flag of unknown) {
+        const name = flag.slice(2);
+        const near = allowed.find((c) => c.startsWith(name) || name.startsWith(c) || distance(c, name) <= 2);
+        console.error(`unknown flag ${flag} for '${command}'${near ? ` (did you mean --${near}?)` : ''}`);
+    }
+    process.exit(1);
+}
+
 const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote };
 if (!commands[cmd]) {
     console.error(`Usage: ticket.mjs <new|list|close|reopen|set|decide|log|promote|index> [...]`);
     process.exit(1);
 }
+rejectUnknownFlags(cmd);
 commands[cmd]();

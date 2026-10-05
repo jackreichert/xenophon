@@ -203,3 +203,43 @@ test('decide and promote find the section under any configured name, old "(for J
     assert.ok(!out.includes('Decisions needed') && !out.includes('Q?'));
     assert.equal(run('promote', 'demo-001').stdout, out);
 });
+
+// ── Strict flags ──────────────────────────────────────────────────────────────
+test('new --body fails loudly, names the flag, suggests --body-file and writes nothing', () => {
+    const { run, file } = setup();
+    const r = run('new', '--title', 'T', '--body', 'text');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /unknown flag --body for 'new' \(did you mean --body-file\?\)/);
+    assert.equal(existsSync(file('demo-001')), false);
+});
+
+test('every subcommand rejects an unknown flag before writing', () => {
+    const { run, read } = setup();
+    assert.equal(run(...BASE).status, 0);
+    const before = read('demo-001');
+    for (const c of [['list'], ['close', 'demo-001'], ['reopen', 'demo-001'], ['set', 'demo-001'], ['decide', 'demo-001'],
+        ['log', 'demo-001', 'note'], ['promote', 'demo-001'], ['index']]) {
+        const r = run(...c, '--bogus');
+        assert.equal(r.status, 1, `${c[0]}: ${r.stderr}`);
+        assert.match(r.stderr, /unknown flag --bogus/);
+    }
+    assert.equal(read('demo-001'), before);
+});
+
+test('a flag valid for one command is rejected on another, and --flag=value is not silently ignored', () => {
+    const { run, read } = setup();
+    assert.equal(run(...BASE).status, 0);
+    assert.match(run('close', 'demo-001', '--priority', '1').stderr, /unknown flag --priority for 'close'/);
+    assert.match(run('set', 'demo-001', '--priority=1').stderr, /unknown flag --priority=1/);
+    assert.match(read('demo-001'), /priority: 2/);
+});
+
+test('known flags and --body-file - on stdin still work', () => {
+    const { vault, run, read } = setup();
+    assert.equal(run(...BASE, '--priority', '1', '--labels', 'a').status, 0);
+    assert.equal(run('set', 'demo-001', '--priority', '3').status, 0);
+    assert.match(read('demo-001'), /priority: 3/);
+    const r = spawnSync('node', [SCRIPT, 'new', '--title', 'Legacy', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input: 'Hand written.', encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(read('demo-002'), /Hand written\./);
+});
