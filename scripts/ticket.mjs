@@ -31,6 +31,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, basename } from 'node:path';
+import { readConfig } from './config.mjs';
 
 const DEFAULT_VAULT = process.env.VAULT_ROOT || '';
 const TYPES = ['bug', 'task', 'feature', 'epic', 'chore'];
@@ -74,23 +75,7 @@ function repoName() {
 }
 const project = arg('project', repoName());
 
-/**
- * Optional settings, in the same shape the-maestro uses: a fenced `xenophon-config`
- * block of `key: value` lines in a markdown file. Path: $XENOPHON_CONFIG, else
- * <vault>/xenophon-config.md. Environment variables win over the file.
- */
-function readConfig() {
-    const path = process.env.XENOPHON_CONFIG || join(vault, 'xenophon-config.md');
-    if (!existsSync(path)) return {};
-    const block = readFileSync(path, 'utf8').match(/```xenophon-config\n([\s\S]*?)```/);
-    const cfg = {};
-    for (const line of (block ? block[1] : '').split('\n')) {
-        const m = line.replace(/\s+#.*$/, '').match(/^\s*([\w-]+)\s*:\s*(.*?)\s*$/);
-        if (m) cfg[m[1]] = m[2];
-    }
-    return cfg;
-}
-const config = readConfig();
+const config = readConfig(vault);
 /** Who the Decisions section is addressed to; empty means a generic heading. */
 const DECIDER = (process.env.XENOPHON_DECIDER ?? config.decider ?? '').trim();
 const DECISIONS_TITLE = DECIDER ? `Decisions needed (for ${DECIDER})` : 'Decisions needed';

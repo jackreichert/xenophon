@@ -11,6 +11,10 @@ Project work is tracked as one markdown note per ticket, in the user's Obsidian 
 
 **The markdown files are the source of truth.** They are meant to be read and edited directly in Obsidian. There is no database and no sync step to forget.
 
+## At session start
+
+Run `node <this-skill>/scripts/update-check.mjs` once. If it prints a line, relay it to the user as-is; if it prints nothing, say nothing. It only reports, unless the `auto_pull` config key is on (see the README), in which case it fast-forwards a clean checkout that is purely behind.
+
 ## Where things live
 
 ```
