@@ -155,18 +155,21 @@ function writeFile(path, content) {
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
-function allTickets() {
+/** Every ticket (open and archived) in one project's Tickets folder. */
+function loadTickets(dir) {
     const out = [];
-    for (const dir of [ticketsDir, archiveDir]) {
-        if (!existsSync(dir)) continue;
-        for (const f of readdirSync(dir)) {
+    for (const d of [dir, join(dir, 'Archive')]) {
+        if (!existsSync(d)) continue;
+        for (const f of readdirSync(d)) {
             if (!f.endsWith('.md') || f === '_Index.md') continue;
-            const t = readTicket(join(dir, f));
+            const t = readTicket(join(d, f));
             if (t?.frontmatter?.id) out.push(t);
         }
     }
     return out.sort((a, b) => String(a.frontmatter.id).localeCompare(String(b.frontmatter.id)));
 }
+
+const allTickets = () => loadTickets(ticketsDir);
 
 function findTicket(id) {
     const t = allTickets().find((x) => x.frontmatter.id === id);
