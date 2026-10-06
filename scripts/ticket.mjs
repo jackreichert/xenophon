@@ -20,7 +20,7 @@
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs list --under <id> [--depth N]  # descendants of a ticket (--epic is an alias)
  *   ticket.mjs list --tree [--under <id>] [--depth N]   # ASCII tree with rollups
- *   ticket.mjs close <id> [--reason "..."]
+ *   ticket.mjs close <id> [--reason "..."] [--force]   # --force: close despite open descendants
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
  *   ticket.mjs set <id> --parent <epic-id|none>
@@ -578,6 +578,14 @@ function cmdClose() {
     ensureDirs();
     const t = findTicket(id);
 
+    const forest = buildForest(vaultTickets());
+    const openBelow = forest.walk([id]).slice(1).filter((e) => e.t.frontmatter.status !== 'closed').map((e) => e.t.frontmatter.id);
+    if (openBelow.length) {
+        const list = `${openBelow.slice(0, 5).join(', ')}${openBelow.length > 5 ? `, and ${openBelow.length - 5} more` : ''}`;
+        console.error(`warning: ${id} has ${openBelow.length} open descendant(s): ${list}.`);
+        if (!has('force')) { console.error('Close them first, or pass --force to close anyway.'); process.exit(1); }
+    }
+
     t.frontmatter.status = 'closed';
     t.frontmatter.closed = today();
     t.frontmatter.updated = today();
@@ -889,7 +897,7 @@ const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
         'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id', 'parent'],
     list: ['status', 'ready', 'label', 'unreviewed', 'decisions', 'under', 'epic', 'depth', 'tree'],
-    close: ['reason'],
+    close: ['reason', 'force'],
     reopen: [],
     set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status', 'parent'],
     decide: ['decision', 'clear'],

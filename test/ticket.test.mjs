@@ -473,3 +473,29 @@ test('promote drops the Children section without a warning', () => {
     assert.doesNotMatch(r.stdout, /Children|xenophon:children|\|/);
     assert.doesNotMatch(r.stderr, /Children/);
 });
+
+// ── Closing a parent ──────────────────────────────────────────────────────────
+test('close refuses a ticket with open descendants (any depth, any project) unless --force', () => {
+    const { vault, run, runIn, file, read } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-005' });
+    const r = run('close', 'demo-001');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /demo-001 has 3 open descendant\(s\): demo-003, demo-005, other-001/);
+    assert.match(r.stderr, /--force/);
+    assert.equal(existsSync(file('demo-001')), true, 'nothing moved');
+    assert.doesNotMatch(read('demo-001'), /status: "closed"/);
+    const f = run('close', 'demo-001', '--force');
+    assert.equal(f.status, 0, f.stderr);
+    assert.match(f.stderr, /3 open descendant/);
+    assert.match(read('demo-001', true), /status: "closed"/);
+    assert.equal(runIn('other', 'close', 'other-001').status, 0, 'a leaf closes without --force');
+});
+
+test('close needs no --force when every descendant is already closed', () => {
+    const { run } = sampleTree();
+    assert.equal(run('close', 'demo-005').status, 0);
+    assert.equal(run('close', 'demo-003').status, 0);
+    const r = run('close', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /warning/);
+});
