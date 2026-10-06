@@ -341,7 +341,7 @@ test('rollup is recursive over every descendant, shown only on tickets with chil
     const idx = readFileSync(join(vault, 'Projects', 'demo', 'Tickets', '_Index.md'), 'utf8');
     assert.match(idx, /demo-001\|T demo-001\]\].*▣ 2\/4 closed \(2 direct\), 1 blocked, 8\/10 pts/);
     assert.match(idx, /demo-005\|T demo-005\]\].*↑ \[\[demo-003\]\]/);
-    assert.doesNotMatch(read('demo-001'), /▣|closed/, 'the rollup is not written into the note');
+    assert.doesNotMatch(read('demo-001'), /2\/4 closed|▣/, 'its own rollup is not written into the note');
 });
 
 test('list --under (alias --epic) lists descendants, --depth limits levels, other projects included', () => {
@@ -419,4 +419,57 @@ test('a hand-edited cycle is reported and its closing edge ignored; nothing hang
         assert.match(r.stderr, /warning: parent cycle demo-001 -> demo-003 -> demo-002 -> demo-001; ignoring the parent of demo-002/);
     }
     assert.match(run('list', '--tree').stdout, /demo-002 .*▣ 0\/2 closed \(1 direct\)/);
+});
+
+// ── Children table and show ───────────────────────────────────────────────────
+test('show prints direct children with their own rollups and writes a marked table into the note', () => {
+    const { vault, run, read } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-001', points: 1 });
+    const r = run('show', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^demo-001 \[epic\] open P2/);
+    assert.match(r.stdout, /rollup: 2\/5 closed \(3 direct\), 1 blocked, 8\/11 pts/);
+    const note = read('demo-001');
+    const block = note.slice(note.indexOf('<!-- xenophon:children -->'), note.indexOf('<!-- /xenophon:children -->'));
+    assert.match(block, /\| \[\[demo-003\]\] \| blocked \| task \| 2 \| T demo-003 \| 1\/2 closed, 5\/5 pts \|/);
+    assert.match(block, /\| \[\[other-001\]\] \| open \| task \| 1 \| T other-001 \| {2}\|/);
+    assert.doesNotMatch(block, /demo-004|demo-005/, 'direct children only');
+    assert.match(note, /^---\nid: "demo-001"/);
+    assert.match(run('show', 'demo-006').stdout, /^demo-006 \[task\] open P2/);
+    assert.doesNotMatch(run('show', 'demo-006').stdout, /\|/);
+    assert.equal(run('show', 'demo-999').status, 1);
+});
+
+test('the children table is idempotent and everything outside the markers is preserved', () => {
+    const { vault, run, file, read } = sampleTree();
+    run('show', 'demo-001');
+    const first = read('demo-001');
+    assert.doesNotMatch(run('show', 'demo-001').stdout, /updated|created/);
+    assert.equal(read('demo-001'), first);
+    writeFileSync(file('demo-001'), `${first.replace('# demo-001', '# demo-001\n\nhand written intro')}\n\n## Notes\n\nkept\n`);
+    put(vault, 'demo', 'demo-007', { parent: 'demo-001' });
+    run('index');
+    const after = read('demo-001');
+    assert.match(after, /hand written intro/);
+    assert.match(after, /## Notes\n\nkept\n$/);
+    assert.match(after, /\[\[demo-007\]\]/, 'index refreshes the table');
+    assert.equal(after.split('<!-- xenophon:children -->').length, 2, 'one block only');
+});
+
+test('index refreshes the table of a parent in another project when a child changes', () => {
+    const { run, runIn, read } = setup();
+    run(...PARENT);
+    runIn('other', ...CHILD, '--parent', 'demo-001', '--points', '2');
+    assert.match(read('demo-001'), /\[\[other-001\]\] \| open/);
+    runIn('other', 'close', 'other-001');
+    assert.match(read('demo-001'), /\[\[other-001\]\] \| closed/);
+});
+
+test('promote drops the Children section without a warning', () => {
+    const { run } = sampleTree();
+    run('show', 'demo-001');
+    const r = run('promote', 'demo-001');
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.stdout, /Children|xenophon:children|\|/);
+    assert.doesNotMatch(r.stderr, /Children/);
 });

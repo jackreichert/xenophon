@@ -27,6 +27,7 @@
  *   ticket.mjs set <id> --reviewed            # stamp today; --reviewed no clears
  *   ticket.mjs list --unreviewed              # what still needs a read
  *   ticket.mjs list --decisions               # tickets waiting on a decision
+ *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -297,6 +298,41 @@ function buildForest(tickets) {
             return out;
         },
     };
+}
+
+const CHILDREN_START = '<!-- xenophon:children -->';
+const CHILDREN_END = '<!-- /xenophon:children -->';
+
+/** Markdown table of a ticket's direct children, each with its own rollup. */
+function childrenTable(forest, id) {
+    const rows = forest.children(id).map((c) => {
+        const fm = c.frontmatter;
+        return `| [[${fm.id}]] | ${fm.status} | ${fm.type} | ${pointsOf(c) || ''} | ${String(fm.title).replace(/\|/g, '\\|')} | ${formatRollup(forest.roll(fm.id))} |`;
+    });
+    return rows.length ? ['| Ticket | Status | Type | Pts | Title | Progress |', '| --- | --- | --- | --- | --- | --- |', ...rows] : ['_No children._'];
+}
+
+/** Replace the generated block between the markers, or add a "Children" section holding it. Touches nothing else. */
+function withChildrenBlock(body, lines) {
+    const block = [CHILDREN_START, ...lines, CHILDREN_END].join('\n');
+    const s = body.indexOf(CHILDREN_START);
+    const e = body.indexOf(CHILDREN_END);
+    if (s !== -1 && e > s) return body.slice(0, s) + block + body.slice(e + CHILDREN_END.length);
+    return appendToSection(body, /^children\b/i, 'Children', block.split('\n'));
+}
+
+/**
+ * Regenerate the children table in a ticket's own note. Only tickets that have
+ * children, or already carry the markers, are touched; the frontmatter and every
+ * byte outside the markers are kept as they are.
+ */
+function syncChildrenNote(forest, t) {
+    const hasKids = forest.children(t.frontmatter.id).length > 0;
+    if (!hasKids && !(t.body.includes(CHILDREN_START) && t.body.includes(CHILDREN_END))) return 'unchanged';
+    const body = withChildrenBlock(t.body, childrenTable(forest, t.frontmatter.id));
+    const status = writeFile(t.path, t.raw.slice(0, t.raw.length - t.body.length) + body);
+    if (status !== 'unchanged') console.log(`${status}  ${t.path}`);
+    return status;
 }
 
 /** "3/8 closed (3 direct), 2 blocked, 8/21 pts" for a ticket with descendants; '' for a leaf. */
@@ -654,7 +690,7 @@ function cmdPromote() {
 
     // The preamble (id, status line, labels) is internal metadata; only the title is emitted.
     const kept = secs.filter((x) => PUBLIC_HEADING.test(x.heading));
-    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal)/i.test(x.heading));
+    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal|children\b)/i.test(x.heading));
     if (dropped.length) console.error(`warning: dropped non-public section(s): ${dropped.map((x) => x.heading).join(', ')}.`);
     if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
         console.error('warning: no "What done looks like" section; add one before filing.');
@@ -824,6 +860,28 @@ function rebuildIndex() {
 
     const path = join(ticketsDir, '_Index.md');
     console.log(`${writeFile(path, lines.join('\n'))}  ${path}`);
+
+    // Children tables follow the tree, including notes in other projects whose
+    // rollups just changed. Tickets with no children and no markers are skipped.
+    for (const t of forest.byId.values()) syncChildrenNote(forest, t);
+}
+
+function cmdShow() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs show <id>'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    const t = forest.byId.get(id);
+    if (!t) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const fm = t.frontmatter;
+    const parent = forest.parentOf.get(id);
+    const rollup = formatRollup(forest.roll(id));
+    console.log(`${fm.id} [${fm.type}] ${fm.status} P${fm.priority}  ${fm.title}`);
+    if (parent) console.log(`parent: ${parent}`);
+    if (rollup) console.log(`rollup: ${rollup}`);
+    if (forest.children(id).length) {
+        console.log(`\n${childrenTable(forest, id).join('\n')}`);
+        syncChildrenNote(forest, t);
+    }
 }
 
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
@@ -837,6 +895,7 @@ const FLAGS = {
     decide: ['decision', 'clear'],
     log: [],
     promote: [],
+    show: [],
     index: [],
 };
 
@@ -868,9 +927,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|decide|log|promote|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);
