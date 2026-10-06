@@ -224,23 +224,10 @@ function pointsOf(t) {
 const byPriorityThenId = (a, b) => (a.frontmatter.priority - b.frontmatter.priority)
     || String(a.frontmatter.id).localeCompare(String(b.frontmatter.id));
 
-/**
- * Parent/child maps plus a recursive rollup for every ticket, all in one pass
- * (no per-node scan, no recursion, so depth and width are both cheap).
- * A parent that does not exist is treated as absent. A hand-edited cycle is
- * reported on stderr and its closing edge is ignored, so it can neither hang
- * nor crash anything.
- */
-function buildForest(tickets) {
-    const byId = new Map(tickets.map((t) => [t.frontmatter.id, t]));
-    const parentOf = new Map();
-    for (const [id, t] of byId) {
-        const p = t.frontmatter.parent;
-        if (p && p !== id && byId.has(p)) parentOf.set(id, p);
-    }
-
+/** Drop, with a warning, the one edge per hand-edited loop that closes it (deterministic: ids visited in order). */
+function breakParentCycles(parentOf) {
     const done = new Set();
-    for (const start of [...byId.keys()].sort()) {
+    for (const start of [...parentOf.keys()].sort()) {
         const path = [];
         let cur = start;
         while (cur !== undefined && !done.has(cur) && !path.includes(cur)) { path.push(cur); cur = parentOf.get(cur); }
@@ -251,17 +238,10 @@ function buildForest(tickets) {
         }
         path.forEach((id) => done.add(id));
     }
+}
 
-    const kids = new Map();
-    for (const [id, p] of parentOf) {
-        if (!kids.has(p)) kids.set(p, []);
-        kids.get(p).push(byId.get(id));
-    }
-    for (const list of kids.values()) list.sort(byPriorityThenId);
-
-    // Parents before children, so the reverse walk sees every child before its parent.
-    const order = [...byId.values()].filter((t) => !parentOf.has(t.frontmatter.id));
-    for (let i = 0; i < order.length; i++) order.push(...(kids.get(order[i].frontmatter.id) ?? []));
+/** Descendant totals per ticket. `order` lists parents before children; it is walked backwards so each child is done first. */
+function computeRollups(order, kids) {
     const rolls = new Map();
     for (const t of order.toReversed()) {
         const r = { total: 0, direct: 0, closed: 0, blocked: 0, ptsTotal: 0, ptsDone: 0 };
@@ -278,6 +258,37 @@ function buildForest(tickets) {
         }
         rolls.set(t.frontmatter.id, r);
     }
+    return rolls;
+}
+
+/**
+ * Parent/child maps plus a recursive rollup for every ticket, all in one pass
+ * (no per-node scan, no recursion, so depth and width are both cheap).
+ * A parent that does not exist is treated as absent. A hand-edited cycle is
+ * reported on stderr and its closing edge is ignored, so it can neither hang
+ * nor crash anything.
+ */
+function buildForest(tickets) {
+    const byId = new Map(tickets.map((t) => [t.frontmatter.id, t]));
+    const parentOf = new Map();
+    for (const [id, t] of byId) {
+        const p = t.frontmatter.parent;
+        if (p && p !== id && byId.has(p)) parentOf.set(id, p);
+    }
+
+    breakParentCycles(parentOf);
+
+    const kids = new Map();
+    for (const [id, p] of parentOf) {
+        if (!kids.has(p)) kids.set(p, []);
+        kids.get(p).push(byId.get(id));
+    }
+    for (const list of kids.values()) list.sort(byPriorityThenId);
+
+    // Parents before children, so the reverse walk sees every child before its parent.
+    const order = [...byId.values()].filter((t) => !parentOf.has(t.frontmatter.id));
+    for (let i = 0; i < order.length; i++) order.push(...(kids.get(order[i].frontmatter.id) ?? []));
+    const rolls = computeRollups(order, kids);
 
     return {
         byId,
