@@ -14,10 +14,11 @@ function setup() {
     delete clean.XENOPHON_DECIDER;
     delete clean.XENOPHON_CONFIG;
     const run = (...a) => runWith({}, ...a);
+    const runIn = (proj, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', proj], { encoding: 'utf8', env: clean });
     const runWith = (env, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8', env: { ...clean, ...env } });
-    const file = (id, archived = false) => join(vault, 'Projects', 'demo', 'Tickets', archived ? 'Archive' : '', `${id}.md`);
-    const read = (id, archived) => readFileSync(file(id, archived), 'utf8');
-    return { vault, run, runWith, file, read };
+    const file = (id, archived = false, proj = 'demo') => join(vault, 'Projects', proj, 'Tickets', archived ? 'Archive' : '', `${id}.md`);
+    const read = (id, archived, proj) => readFileSync(file(id, archived, proj), 'utf8');
+    return { vault, run, runIn, runWith, file, read };
 }
 
 const BASE = ['new', '--title', 'Retry storm on checkout', '--problem', 'Retries fan out.', '--done', 'One retry per request.'];
@@ -242,4 +243,259 @@ test('known flags and --body-file - on stdin still work', () => {
     const r = spawnSync('node', [SCRIPT, 'new', '--title', 'Legacy', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input: 'Hand written.', encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(read('demo-002'), /Hand written\./);
+});
+
+// ── Parents ───────────────────────────────────────────────────────────────────
+const PARENT = ['new', '--type', 'epic', '--title', 'Checkout overhaul', '--problem', 'Too many parts.', '--done', 'All parts shipped.'];
+const CHILD = ['new', '--title', 'Child work', '--problem', 'p', '--done', 'd'];
+
+test('new --parent and set --parent write a parent field; set --parent none clears it', () => {
+    const { run, read } = setup();
+    run(...PARENT);
+    assert.equal(run(...CHILD, '--parent', 'demo-001').status, 0);
+    assert.match(read('demo-002'), /blocked-by: \[\]\nparent: "demo-001"\ncreated:/);
+    run(...CHILD);
+    assert.doesNotMatch(read('demo-003'), /parent:/);
+    assert.equal(run('set', 'demo-003', '--parent', 'demo-001').status, 0);
+    assert.match(read('demo-003'), /parent: "demo-001"/);
+    assert.equal(run('set', 'demo-002', '--priority', '1').status, 0);
+    assert.match(read('demo-002'), /parent: "demo-001"/, 'other edits keep the parent');
+    assert.equal(run('set', 'demo-003', '--parent', 'none').status, 0);
+    assert.doesNotMatch(read('demo-003'), /parent:/);
+});
+
+test('any ticket may be a parent and nesting is not limited', () => {
+    const { run, read } = setup();
+    run(...CHILD);
+    assert.equal(run(...CHILD, '--parent', 'demo-001').status, 0, 'a task as parent');
+    assert.equal(run(...PARENT, '--parent', 'demo-002').status, 0, 'an epic under a task');
+    assert.equal(run(...CHILD, '--parent', 'demo-003').status, 0);
+    assert.match(read('demo-004'), /parent: "demo-003"/);
+});
+
+test('parent refusals: missing, self, unsafe id, cycle (with its path); nothing is written', () => {
+    const { run, file, read } = setup();
+    run(...CHILD);
+    run(...CHILD, '--parent', 'demo-001');
+    run(...CHILD, '--parent', 'demo-002');
+    const before = read('demo-001');
+    const cases = [
+        [['set', 'demo-001', '--parent', 'demo-099'], /No such parent ticket: demo-099/],
+        [['set', 'demo-001', '--parent', 'demo-001'], /own parent/],
+        [['set', 'demo-001', '--parent', '../etc/x-1'], /invalid parent id/],
+        [['set', 'demo-001', '--parent', 'demo-003'], /cycle: demo-001 -> demo-003 -> demo-002 -> demo-001/],
+        [['new', ...CHILD.slice(1), '--parent', 'demo-099'], /No such parent/],
+    ];
+    for (const [c, re] of cases) {
+        const r = run(...c);
+        assert.equal(r.status, 1, c.join(' '));
+        assert.match(r.stderr, re);
+    }
+    assert.equal(read('demo-001'), before);
+    assert.equal(existsSync(file('demo-004')), false, 'a refused new writes nothing');
+});
+
+test('a child in another project resolves its parent by id; an unknown project is refused', () => {
+    const { run, runIn, read } = setup();
+    run(...PARENT);
+    const r = runIn('other', ...CHILD, '--parent', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(read('other-001', false, 'other'), /parent: "demo-001"/);
+    const bad = runIn('other', ...CHILD, '--parent', 'nowhere-001');
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /No such parent ticket: nowhere-001/);
+    assert.equal(runIn('other', 'set', 'other-001', '--parent', 'none').status, 0);
+});
+
+// ── Tree, rollup, list --under / --tree ───────────────────────────────────────
+/** Write a minimal ticket straight to disk (fast path for big fixtures). */
+function put(vault, proj, id, { parent, status = 'open', type = 'task', priority = 2, points } = {}) {
+    const dir = join(vault, 'Projects', proj, 'Tickets', status === 'closed' ? 'Archive' : '');
+    mkdirSync(dir, { recursive: true });
+    const fm = ['---', `id: "${id}"`, `title: "T ${id}"`, `status: "${status}"`, 'reviewed: false', `type: "${type}"`, `priority: ${priority}`,
+        'labels: []', 'blocked-by: []', ...(parent ? [`parent: "${parent}"`] : []), 'created: 2026-01-01', 'updated: 2026-01-01', '---', '', `# ${id}`, ''];
+    const est = points ? ['## Estimate', '', `${points} story points`, ''] : [];
+    writeFileSync(join(dir, `${id}.md`), [...fm, ...est].join('\n'));
+}
+
+function sampleTree() {
+    const s = setup();
+    put(s.vault, 'demo', 'demo-001', { type: 'epic' });
+    put(s.vault, 'demo', 'demo-002', { parent: 'demo-001', status: 'closed', points: 3 });
+    put(s.vault, 'demo', 'demo-003', { parent: 'demo-001', status: 'blocked', points: 2 });
+    put(s.vault, 'demo', 'demo-004', { parent: 'demo-003', status: 'closed', points: 5 });
+    put(s.vault, 'demo', 'demo-005', { parent: 'demo-003' });
+    put(s.vault, 'demo', 'demo-006');
+    return s;
+}
+
+test('rollup is recursive over every descendant, shown only on tickets with children, and never stored', () => {
+    const { vault, run, read } = sampleTree();
+    const out = run('list').stdout;
+    assert.match(out, /demo-001 .*▣ 2\/4 closed \(2 direct\), 1 blocked, 8\/10 pts/);
+    assert.match(out, /demo-003 .*▣ 1\/2 closed, 5\/5 pts/);
+    assert.doesNotMatch(out.split('\n').find((l) => l.includes('demo-005')), /▣/);
+    assert.doesNotMatch(out.split('\n').find((l) => l.includes('demo-006')), /▣|↑/);
+    assert.match(out.split('\n').find((l) => l.includes('demo-005')), /↑ demo-003/);
+    run('index');
+    const idx = readFileSync(join(vault, 'Projects', 'demo', 'Tickets', '_Index.md'), 'utf8');
+    assert.match(idx, /demo-001\|T demo-001\]\].*▣ 2\/4 closed \(2 direct\), 1 blocked, 8\/10 pts/);
+    assert.match(idx, /demo-005\|T demo-005\]\].*↑ \[\[demo-003\]\]/);
+    assert.doesNotMatch(read('demo-001'), /2\/4 closed|▣/, 'its own rollup is not written into the note');
+});
+
+test('list --under (alias --epic) lists descendants, --depth limits levels, other projects included', () => {
+    const { vault, run, runIn } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-005' });
+    const all = run('list', '--under', 'demo-001', '--status', 'all').stdout;
+    for (const id of ['demo-002', 'demo-003', 'demo-004', 'demo-005', 'other-001']) assert.match(all, new RegExp(id));
+    assert.doesNotMatch(all, /demo-006|^P2  demo-001 /m);
+    const one = run('list', '--epic', 'demo-001', '--depth', '1', '--status', 'all').stdout;
+    assert.match(one, /demo-002/);
+    assert.match(one, /demo-003/);
+    assert.doesNotMatch(one, /demo-004|demo-005|other-001/);
+    assert.match(runIn('other', 'list', '--under', 'demo-003').stdout, /demo-005/);
+    assert.equal(run('list', '--under', 'demo-999').status, 1);
+    assert.equal(run('list', '--depth', '2').status, 1);
+    assert.equal(run('list', '--tree', '--depth', '0').status, 1);
+});
+
+test('list --tree draws an ASCII tree; closed nodes stay when open work is below them', () => {
+    const { run } = sampleTree();
+    const t = run('list', '--tree').stdout;
+    assert.equal(t, [
+        'demo-001 [epic] open P2  T demo-001  ▣ 2/4 closed (2 direct), 1 blocked, 8/10 pts',
+        '└─ demo-003 [task] blocked P2 2pt  T demo-003  ▣ 1/2 closed, 5/5 pts',
+        '   └─ demo-005 [task] open P2  T demo-005',
+        'demo-006 [task] open P2  T demo-006',
+        '', '4 ticket(s)', ''].join('\n'));
+    const full = run('list', '--tree', '--under', 'demo-001', '--status', 'all').stdout.split('\n').slice(0, 5);
+    assert.deepEqual(full.map((l) => l.replace(/  ▣.*/, '')), [
+        'demo-001 [epic] open P2  T demo-001',
+        '├─ demo-002 [task] closed P2 3pt  T demo-002',
+        '└─ demo-003 [task] blocked P2 2pt  T demo-003',
+        '   ├─ demo-004 [task] closed P2 5pt  T demo-004',
+        '   └─ demo-005 [task] open P2  T demo-005']);
+});
+
+test('with no parents anywhere nothing changes: no rollup, no arrows, same index', () => {
+    const { run, vault } = setup();
+    run(...BASE);
+    run(...BASE);
+    const idx = readFileSync(join(vault, 'Projects', 'demo', 'Tickets', '_Index.md'), 'utf8');
+    assert.doesNotMatch(idx, /▣|↑/);
+    assert.doesNotMatch(run('list').stdout, /▣|↑/);
+    assert.equal(run('list', '--tree').stdout.split('\n').filter((l) => l.startsWith('demo-')).length, 2);
+});
+
+test('a deep chain and a wide tree list well under a second and roll up fully', () => {
+    const { vault, run, runIn } = setup();
+    put(vault, 'demo', 'demo-0001', { points: 1 });
+    for (let i = 2; i <= 201; i++) put(vault, 'demo', `demo-${String(i).padStart(4, '0')}`, { parent: `demo-${String(i - 1).padStart(4, '0')}` });
+    for (let i = 0; i < 30; i++) {
+        put(vault, 'wide', `wide-${i}`);
+        for (let j = 0; j < 100; j++) put(vault, 'wide', `wideleaf-${i * 100 + j}`, { parent: `wide-${i}` });
+    }
+    const t0 = Date.now();
+    const chain = run('list', '--tree', '--under', 'demo-0001');
+    assert.equal(chain.status, 0, chain.stderr);
+    assert.match(chain.stdout, /demo-0001 .*▣ 0\/200 closed \(1 direct\)/);
+    assert.equal(chain.stdout.split('\n').filter((l) => /demo-\d{4}/.test(l)).length, 201);
+    const wide = runIn('wide', 'list', '--tree');
+    assert.equal(wide.status, 0, wide.stderr);
+    assert.match(wide.stdout, /wide-29 .*▣ 0\/100 closed/);
+    assert.ok(Date.now() - t0 < 2000, `two tree listings of ~3200 tickets took ${Date.now() - t0}ms`);
+});
+
+test('a hand-edited cycle is reported and its closing edge ignored; nothing hangs or crashes', () => {
+    const { vault, run } = setup();
+    put(vault, 'demo', 'demo-001', { parent: 'demo-003' });
+    put(vault, 'demo', 'demo-002', { parent: 'demo-001' });
+    put(vault, 'demo', 'demo-003', { parent: 'demo-002' });
+    put(vault, 'demo', 'demo-004', { parent: 'demo-004' });
+    for (const cmd of [['list'], ['list', '--tree'], ['index']]) {
+        const r = run(...cmd);
+        assert.equal(r.status, 0, `${cmd}: ${r.stderr}`);
+        assert.match(r.stderr, /warning: parent cycle demo-001 -> demo-003 -> demo-002 -> demo-001; ignoring the parent of demo-002/);
+    }
+    assert.match(run('list', '--tree').stdout, /demo-002 .*▣ 0\/2 closed \(1 direct\)/);
+});
+
+// ── Children table and show ───────────────────────────────────────────────────
+test('show prints direct children with their own rollups and writes a marked table into the note', () => {
+    const { vault, run, read } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-001', points: 1 });
+    const r = run('show', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^demo-001 \[epic\] open P2/);
+    assert.match(r.stdout, /rollup: 2\/5 closed \(3 direct\), 1 blocked, 8\/11 pts/);
+    const note = read('demo-001');
+    const block = note.slice(note.indexOf('<!-- xenophon:children -->'), note.indexOf('<!-- /xenophon:children -->'));
+    assert.match(block, /\| \[\[demo-003\]\] \| blocked \| task \| 2 \| T demo-003 \| 1\/2 closed, 5\/5 pts \|/);
+    assert.match(block, /\| \[\[other-001\]\] \| open \| task \| 1 \| T other-001 \| {2}\|/);
+    assert.doesNotMatch(block, /demo-004|demo-005/, 'direct children only');
+    assert.match(note, /^---\nid: "demo-001"/);
+    assert.match(run('show', 'demo-006').stdout, /^demo-006 \[task\] open P2/);
+    assert.doesNotMatch(run('show', 'demo-006').stdout, /\|/);
+    assert.equal(run('show', 'demo-999').status, 1);
+});
+
+test('the children table is idempotent and everything outside the markers is preserved', () => {
+    const { vault, run, file, read } = sampleTree();
+    run('show', 'demo-001');
+    const first = read('demo-001');
+    assert.doesNotMatch(run('show', 'demo-001').stdout, /updated|created/);
+    assert.equal(read('demo-001'), first);
+    writeFileSync(file('demo-001'), `${first.replace('# demo-001', '# demo-001\n\nhand written intro')}\n\n## Notes\n\nkept\n`);
+    put(vault, 'demo', 'demo-007', { parent: 'demo-001' });
+    run('index');
+    const after = read('demo-001');
+    assert.match(after, /hand written intro/);
+    assert.match(after, /## Notes\n\nkept\n$/);
+    assert.match(after, /\[\[demo-007\]\]/, 'index refreshes the table');
+    assert.equal(after.split('<!-- xenophon:children -->').length, 2, 'one block only');
+});
+
+test('index refreshes the table of a parent in another project when a child changes', () => {
+    const { run, runIn, read } = setup();
+    run(...PARENT);
+    runIn('other', ...CHILD, '--parent', 'demo-001', '--points', '2');
+    assert.match(read('demo-001'), /\[\[other-001\]\] \| open/);
+    runIn('other', 'close', 'other-001');
+    assert.match(read('demo-001'), /\[\[other-001\]\] \| closed/);
+});
+
+test('promote drops the Children section without a warning', () => {
+    const { run } = sampleTree();
+    run('show', 'demo-001');
+    const r = run('promote', 'demo-001');
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.stdout, /Children|xenophon:children|\|/);
+    assert.doesNotMatch(r.stderr, /Children/);
+});
+
+// ── Closing a parent ──────────────────────────────────────────────────────────
+test('close refuses a ticket with open descendants (any depth, any project) unless --force', () => {
+    const { vault, run, runIn, file, read } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-005' });
+    const r = run('close', 'demo-001');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /demo-001 has 3 open descendant\(s\): demo-003, demo-005, other-001/);
+    assert.match(r.stderr, /--force/);
+    assert.equal(existsSync(file('demo-001')), true, 'nothing moved');
+    assert.doesNotMatch(read('demo-001'), /status: "closed"/);
+    const f = run('close', 'demo-001', '--force');
+    assert.equal(f.status, 0, f.stderr);
+    assert.match(f.stderr, /3 open descendant/);
+    assert.match(read('demo-001', true), /status: "closed"/);
+    assert.equal(runIn('other', 'close', 'other-001').status, 0, 'a leaf closes without --force');
+});
+
+test('close needs no --force when every descendant is already closed', () => {
+    const { run } = sampleTree();
+    assert.equal(run('close', 'demo-005').status, 0);
+    assert.equal(run('close', 'demo-003').status, 0);
+    const r = run('close', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /warning/);
 });

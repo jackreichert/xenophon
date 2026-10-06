@@ -160,6 +160,7 @@ Field rules:
 | `--priority` | Integer `0`–`4`. `0` is critical, `2` is normal, `4` is backlog. Words are rejected. |
 | `--labels`, `--blocked-by` | Comma-separated, no spaces around the commas. |
 | `--body-file -` | Legacy: read a hand-written body from stdin instead of using the template flags. |
+| `--parent` | Id of an existing ticket to nest under (see Parents, children and rollups). `set` also takes `none`. |
 | `--id` | Only to deliberately reuse an id. Otherwise it is allocated. |
 | `--external` | A pointer to Jira or another tracker. This skill does not sync with it. |
 
@@ -182,7 +183,7 @@ node $T index --project billing-api                 # after hand-editing frontma
 
 Statuses: `open`, `in-progress`, `blocked`, `closed`.
 
-`close` moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given.
+`close` moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. It refuses a ticket with open descendants unless you pass `--force`.
 
 ```bash
 node $T list --project billing-api                   # active work, highest priority first
@@ -195,6 +196,40 @@ node $T list --label permissions --project billing-api
 `--ready` is the "what can I pick up" view. It hides anything whose `blocked-by` still points at an open ticket.
 
 `new` sets `reviewed: false`. Whoever files the ticket leaves it unreviewed. You mark it read. Unreviewed tickets show as `● unreviewed` in `list` and `**unreviewed**` in `_Index.md`.
+
+## Parents, children and rollups
+
+A ticket can have a parent. Any ticket can be a parent (`type: epic` is a label for humans, not a requirement) and nesting has no depth limit, so an epic can hold stories that hold tasks.
+
+```bash
+node $T new --title "Child work" --problem "..." --done "..." --parent billing-api-001
+node $T set billing-api-007 --parent billing-api-001    # reparent; re-checked for cycles
+node $T set billing-api-007 --parent none               # detach
+```
+
+The parent is stored as `parent: "<id>"` in the child's frontmatter. It must exist, a ticket cannot be its own parent, and a parent that would make a ticket its own ancestor is refused with the cycle path (`cycle: a -> b -> c -> a`). Nothing is written on a refusal.
+
+**Ids are scoped by project.** An id is `{project}-NNN`, and the prefix names the project folder that owns the ticket. A parent is resolved by id across every project folder in the vault (`--vault`, or `VAULT_ROOT`), so a child in one project can sit under a parent in another. Both projects must live in the same vault; ids from a different vault are not found.
+
+```bash
+node $T list --under billing-api-001                  # every descendant, any project, any depth
+node $T list --under billing-api-001 --depth 1        # direct children only (--epic is an alias)
+node $T list --tree --project billing-api             # ASCII tree of a project
+node $T list --tree --under billing-api-001 --depth 2 # tree of a subtree
+node $T show billing-api-001                          # parent, rollup and children table
+```
+
+`--tree` shows a node when it, or anything below it, passes the filters, so a closed parent with open work underneath is not hidden. The other `list` filters (`--status`, `--label`, `--ready`, ...) apply to `--under` and `--tree` too. `--depth N` counts levels below the root.
+
+Every ticket that has children shows a **rollup** over its whole subtree, in `list`, `list --tree` and `_Index.md`, for example `2/4 closed (2 direct), 1 blocked, 8/10 pts`. That is closed over total descendants, the number of direct children when it differs, descendants with status `blocked`, and story points done over total (from each ticket's `## Estimate`, shown only when someone has points). Leaves show nothing. The rollup is computed from frontmatter every run and never stored.
+
+The note of a ticket with children carries a generated table of its direct children, each with its own rollup, between `<!-- xenophon:children -->` and `<!-- /xenophon:children -->`. `index` and `show` regenerate it, including for parents in other projects; re-running changes nothing, and everything outside the markers, and the frontmatter, is left alone. `promote` does not emit it.
+
+`close` refuses a ticket that still has open descendants (any depth, any project), naming them; pass `--force` to close it anyway.
+
+A hand-edited loop in the `parent` fields is not fatal: the loop is reported on stderr, the edge that closes it is ignored, and everything else lists as usual. A `parent` naming a ticket that does not exist is treated as no parent. The tree is built in one pass over the vault, so a few thousand tickets list in well under a second.
+
+Tickets without a parent behave exactly as before, and `index` output is unchanged for a project with no parent links.
 
 ## Frontmatter
 
@@ -209,6 +244,7 @@ type: bug
 priority: 1
 labels: [permissions]
 blocked-by: []
+parent: billing-api-000  # optional: id of the parent ticket; absent means none
 external: ""
 reviewed: false
 decision_needed: false   # written by the template; absent on older tickets

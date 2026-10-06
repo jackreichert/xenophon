@@ -2,7 +2,7 @@
 name: xenophon
 description: File, update, close and browse project tickets as flat markdown notes in the Obsidian vault. Trigger on xenophon, file a ticket, open a ticket, log a bug, raise an issue, track this as work, close that ticket, what tickets are open, what should I work on next, or any request to record follow-up work durably rather than in a throwaway TODO list.
 user-invocable: true
-argument-hint: "[new|list|close|reopen|set|decide|log|promote] [description or ticket id]"
+argument-hint: "[new|list|show|close|reopen|set|decide|log|promote] [description or ticket id]"
 ---
 
 # Xenophon
@@ -81,6 +81,7 @@ Field rules:
 - `--type` — `bug`, `task`, `feature`, `epic`, `chore`
 - `--priority` — integer `0`–`4` (0 critical, 2 normal, 4 backlog). Words are rejected.
 - `--labels`, `--blocked-by` — comma-separated, no spaces around the commas
+- `--parent` — id of an existing ticket to nest under (see "Parents, epics and rollups")
 - The id is allocated automatically as `{project}-NNN`. Pass `--id` only to deliberately reuse one.
 - `--body-file -` is the legacy hand-written path (cannot be mixed with the template flags). Use it only for content that does not fit the template.
 - `--body-file` is the only body flag. An unknown flag (e.g. `--body`) exits non-zero before anything is written; a typo no longer files a `_TBD_` ticket.
@@ -97,7 +98,7 @@ Use `decide` and `log` to add decisions and dated updates, rather than editing t
 
 ```bash
 ticket.mjs set <id> --priority 0 --status in-progress --labels a,b --blocked-by other-004
-ticket.mjs close <id> --reason "What actually fixed it"
+ticket.mjs close <id> --reason "What actually fixed it"   # --force if it still has open descendants
 ticket.mjs reopen <id>
 ticket.mjs decide <id> --decision "decision | options | recommendation | stakes"   # add one
 ticket.mjs decide <id> --clear      # decision made; keeps the record
@@ -109,6 +110,24 @@ ticket.mjs index          # rebuild _Index.md after hand-editing frontmatter
 `close` moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. `reopen` moves it back.
 
 Statuses: `open`, `in-progress`, `blocked`, `closed`.
+
+## Parents, epics and rollups
+
+Any ticket can be the parent of another, to any depth; `type: epic` is a label, not a requirement. Link with `--parent <id>` on `new`, or `set <id> --parent <id|none>`. The parent must exist and a ticket may not become its own ancestor (the refusal names the cycle path). Link tickets that genuinely roll up into one outcome; do not use a parent as a label.
+
+```bash
+ticket.mjs new --title "..." --problem "..." --done "..." --parent repo-001
+ticket.mjs set repo-007 --parent repo-001      # or: --parent none
+ticket.mjs list --under repo-001 [--depth 1]   # descendants (--epic is an alias)
+ticket.mjs list --tree [--under repo-001]      # ASCII tree with rollups
+ticket.mjs show repo-001                       # parent, rollup, children table
+```
+
+- **Ids are scoped by project**: `{project}-NNN` names the project that owns the ticket. A parent is found by id across all projects in the vault, so a child in another project can hang under it. Same vault only.
+- A ticket with children shows a rollup over its whole subtree in `list`, `--tree` and `_Index.md`: `2/4 closed (2 direct), 1 blocked, 8/10 pts`. It is computed on each run from frontmatter, never stored. Leaves show nothing.
+- The parent's note holds a generated table of direct children between `<!-- xenophon:children -->` markers; `index` and `show` refresh it and leave everything else alone. Do not hand-edit inside the markers.
+- `close` on a ticket with open descendants warns and exits non-zero; pass `--force` only when that is intended.
+- A hand-edited parent loop is reported and ignored rather than breaking listing; fix the `parent:` line and re-run `index`.
 
 ## Promoting to a tracker
 
@@ -157,5 +176,5 @@ ticket.mjs new --title "..." --vault /path/to/other/vault
 
 - Do not use throwaway TODO lists for durable work — that is what this replaces. Short-lived within-turn planning is fine.
 - One ticket per problem. If an investigation turned up two unrelated problems, file two.
-- Frontmatter is machine-read: keep `id`, `status`, `type`, `priority`, `labels`, `blocked-by` well-formed. The rest of the file is free-form.
+- Frontmatter is machine-read: keep `id`, `status`, `type`, `priority`, `labels`, `blocked-by`, `parent` well-formed. The rest of the file is free-form.
 - Run `ticket.mjs index` after hand-editing frontmatter so `_Index.md` stays accurate.

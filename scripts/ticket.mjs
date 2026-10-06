@@ -11,19 +11,23 @@
  *                  [--decision "what | options | recommendation | stakes"]...
  *                  [--evidence "file:line - note"]... [--link "..."]...
  *                  [--type bug] [--priority 2] [--labels a,b]
- *                  [--external jira-X] [--blocked-by id1,id2]
+ *                  [--external jira-X] [--blocked-by id1,id2] [--parent <epic-id>]
  *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
  *   ticket.mjs decide <id> --decision "what | options | recommendation | stakes"
  *   ticket.mjs decide <id> --clear            # decision made; stops listing as needed
  *   ticket.mjs log <id> "dated update"
  *   ticket.mjs promote <id>                   # print tracker-ready markdown; calls nothing
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
- *   ticket.mjs close <id> [--reason "..."]
+ *   ticket.mjs list --under <id> [--depth N]  # descendants of a ticket (--epic is an alias)
+ *   ticket.mjs list --tree [--under <id>] [--depth N]   # ASCII tree with rollups
+ *   ticket.mjs close <id> [--reason "..."] [--force]   # --force: close despite open descendants
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
+ *   ticket.mjs set <id> --parent <epic-id|none>
  *   ticket.mjs set <id> --reviewed            # stamp today; --reviewed no clears
  *   ticket.mjs list --unreviewed              # what still needs a read
  *   ticket.mjs list --decisions               # tickets waiting on a decision
+ *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -137,6 +141,7 @@ function renderFrontmatter(fm) {
         `priority: ${fm.priority}`,
         `labels: ${yamlList(fm.labels)}`,
         `blocked-by: ${yamlList(fm['blocked-by'])}`,
+        fm.parent ? `parent: ${yamlStr(fm.parent)}` : null,
         fm.external ? `external: ${yamlStr(fm.external)}` : null,
         `created: ${fm.created}`,
         `updated: ${fm.updated}`,
@@ -155,23 +160,200 @@ function writeFile(path, content) {
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
-function allTickets() {
+/** Every ticket (open and archived) in one project's Tickets folder. */
+function loadTickets(dir) {
     const out = [];
-    for (const dir of [ticketsDir, archiveDir]) {
-        if (!existsSync(dir)) continue;
-        for (const f of readdirSync(dir)) {
+    for (const d of [dir, join(dir, 'Archive')]) {
+        if (!existsSync(d)) continue;
+        for (const f of readdirSync(d)) {
             if (!f.endsWith('.md') || f === '_Index.md') continue;
-            const t = readTicket(join(dir, f));
+            const t = readTicket(join(d, f));
             if (t?.frontmatter?.id) out.push(t);
         }
     }
     return out.sort((a, b) => String(a.frontmatter.id).localeCompare(String(b.frontmatter.id)));
 }
 
+const allTickets = () => loadTickets(ticketsDir);
+
 function findTicket(id) {
     const t = allTickets().find((x) => x.frontmatter.id === id);
     if (!t) { console.error(`No such ticket: ${id}`); process.exit(1); }
     return t;
+}
+
+// ── Parents ───────────────────────────────────────────────────────────────────
+// A ticket's `parent` names another ticket by id. Any ticket may be a parent and
+// nesting has no depth limit. Ids are `{project}-NNN`, so a child may live in a
+// different project of the same vault than its parent.
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Every ticket of every project in the vault, one scan. */
+function vaultTickets() {
+    const root = join(vault, 'Projects');
+    if (!existsSync(root)) return [];
+    return readdirSync(root).flatMap((p) => loadTickets(join(root, p, 'Tickets')));
+}
+
+/** Why `childId` may not take `parentId` as its parent, or null if it may. */
+function parentError(childId, parentId) {
+    if (!SAFE_ID.test(parentId) || parentId.includes('..')) return `invalid parent id: ${parentId}`;
+    if (parentId === childId) return `${childId} cannot be its own parent.`;
+    const parentOf = new Map(vaultTickets().map((t) => [t.frontmatter.id, t.frontmatter.parent]));
+    if (!parentOf.has(parentId)) return `No such parent ticket: ${parentId} (looked in the vault at ${vault}).`;
+    const path = [childId, parentId];
+    for (let up = parentOf.get(parentId); up && !path.includes(up); up = parentOf.get(up)) path.push(up);
+    return parentOf.get(path.at(-1)) === childId ? `cycle: ${[...path, childId].join(' -> ')}` : null;
+}
+
+function requireValidParent(childId, parentId) {
+    const err = parentError(childId, parentId);
+    if (err) { console.error(err); process.exit(1); }
+}
+
+// ── Tree and rollup ───────────────────────────────────────────────────────────
+// Built once per command from every ticket in the vault. Nothing here is stored:
+// counts are recomputed from the notes' frontmatter each run.
+
+/** Story points from the "## Estimate" section; 0 when absent. */
+function pointsOf(t) {
+    const m = t.body.match(/^## Estimate\s*\n+\s*(\d+) story points?/m);
+    return m ? Number(m[1]) : 0;
+}
+
+const byPriorityThenId = (a, b) => (a.frontmatter.priority - b.frontmatter.priority)
+    || String(a.frontmatter.id).localeCompare(String(b.frontmatter.id));
+
+/** Drop, with a warning, the one edge per hand-edited loop that closes it (deterministic: ids visited in order). */
+function breakParentCycles(parentOf) {
+    const done = new Set();
+    for (const start of [...parentOf.keys()].sort()) {
+        const path = [];
+        let cur = start;
+        while (cur !== undefined && !done.has(cur) && !path.includes(cur)) { path.push(cur); cur = parentOf.get(cur); }
+        if (cur !== undefined && !done.has(cur)) {
+            const loop = path.slice(path.indexOf(cur));
+            console.error(`warning: parent cycle ${[...loop, cur].join(' -> ')}; ignoring the parent of ${loop.at(-1)}.`);
+            parentOf.delete(loop.at(-1));
+        }
+        path.forEach((id) => done.add(id));
+    }
+}
+
+/** Descendant totals per ticket. `order` lists parents before children; it is walked backwards so each child is done first. */
+function computeRollups(order, kids) {
+    const rolls = new Map();
+    for (const t of order.toReversed()) {
+        const r = { total: 0, direct: 0, closed: 0, blocked: 0, ptsTotal: 0, ptsDone: 0 };
+        for (const c of kids.get(t.frontmatter.id) ?? []) {
+            const cr = rolls.get(c.frontmatter.id);
+            const closed = c.frontmatter.status === 'closed';
+            const pts = pointsOf(c);
+            r.direct += 1;
+            r.total += 1 + cr.total;
+            r.closed += (closed ? 1 : 0) + cr.closed;
+            r.blocked += (c.frontmatter.status === 'blocked' ? 1 : 0) + cr.blocked;
+            r.ptsTotal += pts + cr.ptsTotal;
+            r.ptsDone += (closed ? pts : 0) + cr.ptsDone;
+        }
+        rolls.set(t.frontmatter.id, r);
+    }
+    return rolls;
+}
+
+/**
+ * Parent/child maps plus a recursive rollup for every ticket, all in one pass
+ * (no per-node scan, no recursion, so depth and width are both cheap).
+ * A parent that does not exist is treated as absent. A hand-edited cycle is
+ * reported on stderr and its closing edge is ignored, so it can neither hang
+ * nor crash anything.
+ */
+function buildForest(tickets) {
+    const byId = new Map(tickets.map((t) => [t.frontmatter.id, t]));
+    const parentOf = new Map();
+    for (const [id, t] of byId) {
+        const p = t.frontmatter.parent;
+        if (p && p !== id && byId.has(p)) parentOf.set(id, p);
+    }
+
+    breakParentCycles(parentOf);
+
+    const kids = new Map();
+    for (const [id, p] of parentOf) {
+        if (!kids.has(p)) kids.set(p, []);
+        kids.get(p).push(byId.get(id));
+    }
+    for (const list of kids.values()) list.sort(byPriorityThenId);
+
+    // Parents before children, so the reverse walk sees every child before its parent.
+    const order = [...byId.values()].filter((t) => !parentOf.has(t.frontmatter.id));
+    for (let i = 0; i < order.length; i++) order.push(...(kids.get(order[i].frontmatter.id) ?? []));
+    const rolls = computeRollups(order, kids);
+
+    return {
+        byId,
+        parentOf,
+        children: (id) => kids.get(id) ?? [],
+        roll: (id) => rolls.get(id),
+        /** Pre-order [{t, depth, parent}] under `rootIds`, down to `maxDepth` levels below them. */
+        walk(rootIds, maxDepth = Infinity) {
+            const out = [];
+            const stack = rootIds.map((id) => ({ t: byId.get(id), depth: 0, parent: -1 })).reverse();
+            while (stack.length) {
+                const e = stack.pop();
+                const idx = out.push(e) - 1;
+                if (e.depth < maxDepth) {
+                    for (const c of this.children(e.t.frontmatter.id).toReversed()) stack.push({ t: c, depth: e.depth + 1, parent: idx });
+                }
+            }
+            return out;
+        },
+    };
+}
+
+const CHILDREN_START = '<!-- xenophon:children -->';
+const CHILDREN_END = '<!-- /xenophon:children -->';
+
+/** Markdown table of a ticket's direct children, each with its own rollup. */
+function childrenTable(forest, id) {
+    const rows = forest.children(id).map((c) => {
+        const fm = c.frontmatter;
+        return `| [[${fm.id}]] | ${fm.status} | ${fm.type} | ${pointsOf(c) || ''} | ${String(fm.title).replace(/\|/g, '\\|')} | ${formatRollup(forest.roll(fm.id))} |`;
+    });
+    return rows.length ? ['| Ticket | Status | Type | Pts | Title | Progress |', '| --- | --- | --- | --- | --- | --- |', ...rows] : ['_No children._'];
+}
+
+/** Replace the generated block between the markers, or add a "Children" section holding it. Touches nothing else. */
+function withChildrenBlock(body, lines) {
+    const block = [CHILDREN_START, ...lines, CHILDREN_END].join('\n');
+    const s = body.indexOf(CHILDREN_START);
+    const e = body.indexOf(CHILDREN_END);
+    if (s !== -1 && e > s) return body.slice(0, s) + block + body.slice(e + CHILDREN_END.length);
+    return appendToSection(body, /^children\b/i, 'Children', block.split('\n'));
+}
+
+/**
+ * Regenerate the children table in a ticket's own note. Only tickets that have
+ * children, or already carry the markers, are touched; the frontmatter and every
+ * byte outside the markers are kept as they are.
+ */
+function syncChildrenNote(forest, t) {
+    const hasKids = forest.children(t.frontmatter.id).length > 0;
+    if (!hasKids && !(t.body.includes(CHILDREN_START) && t.body.includes(CHILDREN_END))) return 'unchanged';
+    const body = withChildrenBlock(t.body, childrenTable(forest, t.frontmatter.id));
+    const status = writeFile(t.path, t.raw.slice(0, t.raw.length - t.body.length) + body);
+    if (status !== 'unchanged') console.log(`${status}  ${t.path}`);
+    return status;
+}
+
+/** "3/8 closed (3 direct), 2 blocked, 8/21 pts" for a ticket with descendants; '' for a leaf. */
+function formatRollup(r) {
+    if (!r || !r.total) return '';
+    return [
+        `${r.closed}/${r.total} closed${r.direct === r.total ? '' : ` (${r.direct} direct)`}`,
+        r.blocked ? `${r.blocked} blocked` : null,
+        r.ptsTotal ? `${r.ptsDone}/${r.ptsTotal} pts` : null,
+    ].filter(Boolean).join(', ');
 }
 
 function nextId() {
@@ -344,6 +526,10 @@ function cmdNew() {
         process.exit(1);
     }
 
+    const id = arg('id') || nextId();
+    const parent = arg('parent');
+    if (parent) requireValidParent(id, parent);
+
     const bodyFile = arg('body-file');
     const spec = templateSpec();
     const legacy = Boolean(bodyFile);
@@ -355,7 +541,7 @@ function cmdNew() {
     const legacyBody = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
 
     const fm = {
-        id: arg('id') || nextId(),
+        id,
         title,
         status: 'open',
         reviewed: false,
@@ -365,6 +551,7 @@ function cmdNew() {
         labels: (arg('labels') || '').split(',').map((s) => s.trim()).filter(Boolean),
         'blocked-by': (arg('blocked-by') || '').split(',').map((s) => s.trim()).filter(Boolean),
         external: arg('external'),
+        parent,
         created: today(),
         updated: today(),
     };
@@ -401,6 +588,14 @@ function cmdClose() {
     if (!id) { console.error('Usage: ticket.mjs close <id>'); process.exit(1); }
     ensureDirs();
     const t = findTicket(id);
+
+    const forest = buildForest(vaultTickets());
+    const openBelow = forest.walk([id]).slice(1).filter((e) => e.t.frontmatter.status !== 'closed').map((e) => e.t.frontmatter.id);
+    if (openBelow.length) {
+        const list = `${openBelow.slice(0, 5).join(', ')}${openBelow.length > 5 ? `, and ${openBelow.length - 5} more` : ''}`;
+        console.error(`warning: ${id} has ${openBelow.length} open descendant(s): ${list}.`);
+        if (!has('force')) { console.error('Close them first, or pass --force to close anyway.'); process.exit(1); }
+    }
 
     t.frontmatter.status = 'closed';
     t.frontmatter.closed = today();
@@ -442,6 +637,11 @@ function cmdSet() {
     if (arg('blocked-by') !== null) t.frontmatter['blocked-by'] = arg('blocked-by').split(',').map((s) => s.trim()).filter(Boolean);
     if (arg('external') !== null) t.frontmatter.external = arg('external');
     if (arg('title') !== null) t.frontmatter.title = arg('title');
+    if (arg('parent') !== null) {
+        const p = arg('parent');
+        if (p === 'none') delete t.frontmatter.parent;
+        else { requireValidParent(id, p); t.frontmatter.parent = p; }
+    }
     // --reviewed with no value stamps today; 'no'/'false' clears it; anything
     // else is stored verbatim so a specific date can be backdated.
     if (arg('reviewed') !== null) {
@@ -509,7 +709,7 @@ function cmdPromote() {
 
     // The preamble (id, status line, labels) is internal metadata; only the title is emitted.
     const kept = secs.filter((x) => PUBLIC_HEADING.test(x.heading));
-    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal)/i.test(x.heading));
+    const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal|children\b)/i.test(x.heading));
     if (dropped.length) console.error(`warning: dropped non-public section(s): ${dropped.map((x) => x.heading).join(', ')}.`);
     if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
         console.error('warning: no "What done looks like" section; add one before filing.');
@@ -541,10 +741,21 @@ function cmdList() {
     // literal string 'open' would hide a ticket the moment it went in-progress.
     const status = arg('status', 'active');
     const label = arg('label');
-    const tickets = allTickets();
-    const openIds = new Set(tickets.filter((t) => t.frontmatter.status !== 'closed').map((t) => t.frontmatter.id));
+    const forest = buildForest(vaultTickets());
+    const under = arg('under') ?? arg('epic');
+    const depth = arg('depth') === null ? Infinity : Number(arg('depth'));
+    if (under && !forest.byId.has(under)) { console.error(`No such ticket: ${under}`); process.exit(1); }
+    if (has('depth') && !(Number.isInteger(depth) && depth >= 1 && (under || has('tree')))) {
+        console.error('--depth takes an integer >= 1 and goes with --under or --tree.');
+        process.exit(1);
+    }
 
-    let rows = tickets.filter((t) => {
+    const projectTickets = allTickets();
+    const subtree = under ? forest.walk([under], depth).slice(1).map((e) => e.t) : [];
+    const tickets = under ? subtree : projectTickets;
+    const openIds = new Set([...projectTickets, ...subtree].filter((t) => t.frontmatter.status !== 'closed').map((t) => t.frontmatter.id));
+
+    const passes = (t) => {
         const fm = t.frontmatter;
         if (status === 'active' && fm.status === 'closed') return false;
         if (status !== 'all' && status !== 'active' && fm.status !== status) return false;
@@ -554,23 +765,65 @@ function cmdList() {
         if (has('unreviewed') && fm.reviewed) return false;
         if (has('decisions') && fm.decision_needed !== true) return false;
         return true;
-    });
+    };
 
-    rows.sort((a, b) => (a.frontmatter.priority - b.frontmatter.priority)
-        || String(a.frontmatter.id).localeCompare(String(b.frontmatter.id)));
+    if (has('tree')) { printTree(forest, under ? [under] : projectRoots(forest, projectTickets), depth, passes, Boolean(under)); return; }
+
+    const rows = tickets.filter(passes).sort(byPriorityThenId);
 
     if (!rows.length) { console.log('No matching tickets.'); return; }
     for (const t of rows) {
         const fm = t.frontmatter;
         const blockers = (fm['blocked-by'] || []).filter((b) => openIds.has(b));
+        const rollup = formatRollup(forest.roll(fm.id));
         console.log(
             `P${fm.priority}  ${String(fm.id).padEnd(20)} [${String(fm.type).padEnd(7)}] ${fm.status.padEnd(11)} ${fm.title}`
             + (fm.decision_needed === true ? '  ? decision needed' : '')
             + (fm.reviewed ? '' : '  ● unreviewed')
             + (blockers.length ? `  ⛔ blocked by ${blockers.join(', ')}` : '')
+            + (forest.parentOf.has(fm.id) ? `  ↑ ${forest.parentOf.get(fm.id)}` : '')
+            + (rollup ? `  ▣ ${rollup}` : '')
         );
     }
     console.log(`\n${rows.length} ticket(s)`);
+}
+
+/** Tree roots for a whole-project view: tickets of this project whose parent is not also in it. */
+function projectRoots(forest, projectTickets) {
+    const ids = new Set(projectTickets.map((t) => t.frontmatter.id));
+    return projectTickets.filter((t) => !ids.has(forest.parentOf.get(t.frontmatter.id))).sort(byPriorityThenId)
+        .map((t) => t.frontmatter.id);
+}
+
+/**
+ * ASCII tree. A node shows when it passes the filters or something below it does,
+ * so a closed parent with open work under it is not hidden. `keepRoot` always
+ * shows the root of an --under tree.
+ */
+function printTree(forest, rootIds, depth, passes, keepRoot) {
+    const entries = forest.walk(rootIds, depth);
+    const visible = entries.map((e) => passes(e.t));
+    if (keepRoot) visible[0] = true;
+    for (let i = entries.length - 1; i > 0; i--) if (visible[i] && entries[i].parent >= 0) visible[entries[i].parent] = true;
+    const kids = entries.map(() => []);
+    entries.forEach((e, i) => { if (visible[i] && e.parent >= 0) kids[e.parent].push(i); });
+
+    let shown = 0;
+    const stack = entries.flatMap((e, i) => (e.parent < 0 && visible[i] ? [{ i, prefix: '', last: true }] : [])).reverse();
+    if (!stack.length) { console.log('No matching tickets.'); return; }
+    while (stack.length) {
+        const { i, prefix, last } = stack.pop();
+        const { t, depth: d } = entries[i];
+        const fm = t.frontmatter;
+        const pts = pointsOf(t);
+        const rollup = formatRollup(forest.roll(fm.id));
+        console.log(`${d === 0 ? '' : `${prefix}${last ? '└─ ' : '├─ '}`}${fm.id} [${fm.type}] ${fm.status} P${fm.priority}`
+            + `${pts ? ` ${pts}pt` : ''}  ${fm.title}${rollup ? `  ▣ ${rollup}` : ''}`);
+        shown += 1;
+        const childPrefix = d === 0 ? '' : `${prefix}${last ? '   ' : '│  '}`;
+        for (let n = kids[i].length - 1; n >= 0; n--) stack.push({ i: kids[i][n], prefix: childPrefix, last: n === kids[i].length - 1 });
+    }
+    console.log(`\n${shown} ticket(s)`);
 }
 
 function rebuildIndex() {
@@ -579,6 +832,7 @@ function rebuildIndex() {
     const open = tickets.filter((t) => t.frontmatter.status !== 'closed');
     const closed = tickets.filter((t) => t.frontmatter.status === 'closed');
     const openIds = new Set(open.map((t) => t.frontmatter.id));
+    const forest = buildForest(vaultTickets());
 
     const lines = [
         '---',
@@ -610,7 +864,9 @@ function rebuildIndex() {
                 + (fm.decision_needed === true ? ' · **decision needed**' : '')
                 + (fm.reviewed ? '' : ' · **unreviewed**')
                 + (tags ? ` · ${tags}` : '')
-                + (blockers.length ? ` · ⛔ ${blockers.map((b) => `[[${b}]]`).join(', ')}` : ''));
+                + (blockers.length ? ` · ⛔ ${blockers.map((b) => `[[${b}]]`).join(', ')}` : '')
+                + (forest.parentOf.has(fm.id) ? ` · ↑ [[${forest.parentOf.get(fm.id)}]]` : '')
+                + (forest.roll(fm.id)?.total ? ` · ▣ ${formatRollup(forest.roll(fm.id))}` : ''));
         }
         lines.push('');
     }
@@ -623,19 +879,42 @@ function rebuildIndex() {
 
     const path = join(ticketsDir, '_Index.md');
     console.log(`${writeFile(path, lines.join('\n'))}  ${path}`);
+
+    // Children tables follow the tree, including notes in other projects whose
+    // rollups just changed. Tickets with no children and no markers are skipped.
+    for (const t of forest.byId.values()) syncChildrenNote(forest, t);
+}
+
+function cmdShow() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs show <id>'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    const t = forest.byId.get(id);
+    if (!t) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const fm = t.frontmatter;
+    const parent = forest.parentOf.get(id);
+    const rollup = formatRollup(forest.roll(id));
+    console.log(`${fm.id} [${fm.type}] ${fm.status} P${fm.priority}  ${fm.title}`);
+    if (parent) console.log(`parent: ${parent}`);
+    if (rollup) console.log(`rollup: ${rollup}`);
+    if (forest.children(id).length) {
+        console.log(`\n${childrenTable(forest, id).join('\n')}`);
+        syncChildrenNote(forest, t);
+    }
 }
 
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
-        'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id'],
-    list: ['status', 'ready', 'label', 'unreviewed', 'decisions'],
-    close: ['reason'],
+        'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id', 'parent'],
+    list: ['status', 'ready', 'label', 'unreviewed', 'decisions', 'under', 'epic', 'depth', 'tree'],
+    close: ['reason', 'force'],
     reopen: [],
-    set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status'],
+    set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status', 'parent'],
     decide: ['decision', 'clear'],
     log: [],
     promote: [],
+    show: [],
     index: [],
 };
 
@@ -667,9 +946,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|close|reopen|set|decide|log|promote|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);
