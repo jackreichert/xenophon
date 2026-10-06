@@ -11,7 +11,7 @@
  *                  [--decision "what | options | recommendation | stakes"]...
  *                  [--evidence "file:line - note"]... [--link "..."]...
  *                  [--type bug] [--priority 2] [--labels a,b]
- *                  [--external jira-X] [--blocked-by id1,id2]
+ *                  [--external jira-X] [--blocked-by id1,id2] [--parent <epic-id>]
  *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
  *   ticket.mjs decide <id> --decision "what | options | recommendation | stakes"
  *   ticket.mjs decide <id> --clear            # decision made; stops listing as needed
@@ -21,6 +21,7 @@
  *   ticket.mjs close <id> [--reason "..."]
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
+ *   ticket.mjs set <id> --parent <epic-id|none>
  *   ticket.mjs set <id> --reviewed            # stamp today; --reviewed no clears
  *   ticket.mjs list --unreviewed              # what still needs a read
  *   ticket.mjs list --decisions               # tickets waiting on a decision
@@ -137,6 +138,7 @@ function renderFrontmatter(fm) {
         `priority: ${fm.priority}`,
         `labels: ${yamlList(fm.labels)}`,
         `blocked-by: ${yamlList(fm['blocked-by'])}`,
+        fm.parent ? `parent: ${yamlStr(fm.parent)}` : null,
         fm.external ? `external: ${yamlStr(fm.external)}` : null,
         `created: ${fm.created}`,
         `updated: ${fm.updated}`,
@@ -175,6 +177,35 @@ function findTicket(id) {
     const t = allTickets().find((x) => x.frontmatter.id === id);
     if (!t) { console.error(`No such ticket: ${id}`); process.exit(1); }
     return t;
+}
+
+// ── Parents ───────────────────────────────────────────────────────────────────
+// A ticket's `parent` names another ticket by id. Any ticket may be a parent and
+// nesting has no depth limit. Ids are `{project}-NNN`, so a child may live in a
+// different project of the same vault than its parent.
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Every ticket of every project in the vault, one scan. */
+function vaultTickets() {
+    const root = join(vault, 'Projects');
+    if (!existsSync(root)) return [];
+    return readdirSync(root).flatMap((p) => loadTickets(join(root, p, 'Tickets')));
+}
+
+/** Why `childId` may not take `parentId` as its parent, or null if it may. */
+function parentError(childId, parentId) {
+    if (!SAFE_ID.test(parentId) || parentId.includes('..')) return `invalid parent id: ${parentId}`;
+    if (parentId === childId) return `${childId} cannot be its own parent.`;
+    const parentOf = new Map(vaultTickets().map((t) => [t.frontmatter.id, t.frontmatter.parent]));
+    if (!parentOf.has(parentId)) return `No such parent ticket: ${parentId} (looked in the vault at ${vault}).`;
+    const path = [childId, parentId];
+    for (let up = parentOf.get(parentId); up && !path.includes(up); up = parentOf.get(up)) path.push(up);
+    return parentOf.get(path.at(-1)) === childId ? `cycle: ${[...path, childId].join(' -> ')}` : null;
+}
+
+function requireValidParent(childId, parentId) {
+    const err = parentError(childId, parentId);
+    if (err) { console.error(err); process.exit(1); }
 }
 
 function nextId() {
@@ -347,6 +378,10 @@ function cmdNew() {
         process.exit(1);
     }
 
+    const id = arg('id') || nextId();
+    const parent = arg('parent');
+    if (parent) requireValidParent(id, parent);
+
     const bodyFile = arg('body-file');
     const spec = templateSpec();
     const legacy = Boolean(bodyFile);
@@ -358,7 +393,7 @@ function cmdNew() {
     const legacyBody = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
 
     const fm = {
-        id: arg('id') || nextId(),
+        id,
         title,
         status: 'open',
         reviewed: false,
@@ -368,6 +403,7 @@ function cmdNew() {
         labels: (arg('labels') || '').split(',').map((s) => s.trim()).filter(Boolean),
         'blocked-by': (arg('blocked-by') || '').split(',').map((s) => s.trim()).filter(Boolean),
         external: arg('external'),
+        parent,
         created: today(),
         updated: today(),
     };
@@ -445,6 +481,11 @@ function cmdSet() {
     if (arg('blocked-by') !== null) t.frontmatter['blocked-by'] = arg('blocked-by').split(',').map((s) => s.trim()).filter(Boolean);
     if (arg('external') !== null) t.frontmatter.external = arg('external');
     if (arg('title') !== null) t.frontmatter.title = arg('title');
+    if (arg('parent') !== null) {
+        const p = arg('parent');
+        if (p === 'none') delete t.frontmatter.parent;
+        else { requireValidParent(id, p); t.frontmatter.parent = p; }
+    }
     // --reviewed with no value stamps today; 'no'/'false' clears it; anything
     // else is stored verbatim so a specific date can be backdated.
     if (arg('reviewed') !== null) {
@@ -631,11 +672,11 @@ function rebuildIndex() {
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
-        'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id'],
+        'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id', 'parent'],
     list: ['status', 'ready', 'label', 'unreviewed', 'decisions'],
     close: ['reason'],
     reopen: [],
-    set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status'],
+    set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status', 'parent'],
     decide: ['decision', 'clear'],
     log: [],
     promote: [],

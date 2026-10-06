@@ -14,10 +14,11 @@ function setup() {
     delete clean.XENOPHON_DECIDER;
     delete clean.XENOPHON_CONFIG;
     const run = (...a) => runWith({}, ...a);
+    const runIn = (proj, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', proj], { encoding: 'utf8', env: clean });
     const runWith = (env, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8', env: { ...clean, ...env } });
-    const file = (id, archived = false) => join(vault, 'Projects', 'demo', 'Tickets', archived ? 'Archive' : '', `${id}.md`);
-    const read = (id, archived) => readFileSync(file(id, archived), 'utf8');
-    return { vault, run, runWith, file, read };
+    const file = (id, archived = false, proj = 'demo') => join(vault, 'Projects', proj, 'Tickets', archived ? 'Archive' : '', `${id}.md`);
+    const read = (id, archived, proj) => readFileSync(file(id, archived, proj), 'utf8');
+    return { vault, run, runIn, runWith, file, read };
 }
 
 const BASE = ['new', '--title', 'Retry storm on checkout', '--problem', 'Retries fan out.', '--done', 'One retry per request.'];
@@ -242,4 +243,66 @@ test('known flags and --body-file - on stdin still work', () => {
     const r = spawnSync('node', [SCRIPT, 'new', '--title', 'Legacy', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input: 'Hand written.', encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(read('demo-002'), /Hand written\./);
+});
+
+// ── Parents ───────────────────────────────────────────────────────────────────
+const PARENT = ['new', '--type', 'epic', '--title', 'Checkout overhaul', '--problem', 'Too many parts.', '--done', 'All parts shipped.'];
+const CHILD = ['new', '--title', 'Child work', '--problem', 'p', '--done', 'd'];
+
+test('new --parent and set --parent write a parent field; set --parent none clears it', () => {
+    const { run, read } = setup();
+    run(...PARENT);
+    assert.equal(run(...CHILD, '--parent', 'demo-001').status, 0);
+    assert.match(read('demo-002'), /blocked-by: \[\]\nparent: "demo-001"\ncreated:/);
+    run(...CHILD);
+    assert.doesNotMatch(read('demo-003'), /parent:/);
+    assert.equal(run('set', 'demo-003', '--parent', 'demo-001').status, 0);
+    assert.match(read('demo-003'), /parent: "demo-001"/);
+    assert.equal(run('set', 'demo-002', '--priority', '1').status, 0);
+    assert.match(read('demo-002'), /parent: "demo-001"/, 'other edits keep the parent');
+    assert.equal(run('set', 'demo-003', '--parent', 'none').status, 0);
+    assert.doesNotMatch(read('demo-003'), /parent:/);
+});
+
+test('any ticket may be a parent and nesting is not limited', () => {
+    const { run, read } = setup();
+    run(...CHILD);
+    assert.equal(run(...CHILD, '--parent', 'demo-001').status, 0, 'a task as parent');
+    assert.equal(run(...PARENT, '--parent', 'demo-002').status, 0, 'an epic under a task');
+    assert.equal(run(...CHILD, '--parent', 'demo-003').status, 0);
+    assert.match(read('demo-004'), /parent: "demo-003"/);
+});
+
+test('parent refusals: missing, self, unsafe id, cycle (with its path); nothing is written', () => {
+    const { run, file, read } = setup();
+    run(...CHILD);
+    run(...CHILD, '--parent', 'demo-001');
+    run(...CHILD, '--parent', 'demo-002');
+    const before = read('demo-001');
+    const cases = [
+        [['set', 'demo-001', '--parent', 'demo-099'], /No such parent ticket: demo-099/],
+        [['set', 'demo-001', '--parent', 'demo-001'], /own parent/],
+        [['set', 'demo-001', '--parent', '../etc/x-1'], /invalid parent id/],
+        [['set', 'demo-001', '--parent', 'demo-003'], /cycle: demo-001 -> demo-003 -> demo-002 -> demo-001/],
+        [['new', ...CHILD.slice(1), '--parent', 'demo-099'], /No such parent/],
+    ];
+    for (const [c, re] of cases) {
+        const r = run(...c);
+        assert.equal(r.status, 1, c.join(' '));
+        assert.match(r.stderr, re);
+    }
+    assert.equal(read('demo-001'), before);
+    assert.equal(existsSync(file('demo-004')), false, 'a refused new writes nothing');
+});
+
+test('a child in another project resolves its parent by id; an unknown project is refused', () => {
+    const { run, runIn, read } = setup();
+    run(...PARENT);
+    const r = runIn('other', ...CHILD, '--parent', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(read('other-001', false, 'other'), /parent: "demo-001"/);
+    const bad = runIn('other', ...CHILD, '--parent', 'nowhere-001');
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /No such parent ticket: nowhere-001/);
+    assert.equal(runIn('other', 'set', 'other-001', '--parent', 'none').status, 0);
 });
