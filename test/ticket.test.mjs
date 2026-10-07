@@ -671,3 +671,123 @@ test('docs reports a leaf with a doc, none, an unknown ticket, and ignores symli
     assert.doesNotMatch(run('docs', 'demo-001').stdout, /alias\.md/);
     assert.equal(run('docs').status, 1);
 });
+
+// ── Supporting docs: brief ────────────────────────────────────────────────────
+const BRIEF = 'Projects/demo/Briefs/demo-001.md';
+const TODAY = new Date().toISOString().slice(0, 10);
+
+/** Rewrite the brief's written-at date so tickets touched "today" count as later. */
+function backdate(vault, date) {
+    const p = join(vault, BRIEF);
+    writeFileSync(p, readFileSync(p, 'utf8').replace(/^updated: .*$/m, `updated: ${date}`));
+}
+
+test('brief with no flag says missing and writes nothing; --init scaffolds it from the template with a snapshot', () => {
+    const { vault, run } = sampleTree();
+    const missing = run('brief', 'demo-001');
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.match(missing.stdout, /demo-001 brief: missing/);
+    assert.match(missing.stdout, /brief demo-001 --init/);
+    assert.equal(existsSync(join(vault, BRIEF)), false);
+
+    const r = run('brief', 'demo-001', '--init');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^created +${join(vault, BRIEF).replace(/[.\\/]/g, '\\$&')}`));
+    const t = readFileSync(join(vault, BRIEF), 'utf8');
+    assert.match(t, new RegExp(`^---\\nkind: brief\\nepic: "demo-001"\\ntitle: "T demo-001"\\nupdated: ${TODAY}\\nbasis: "closed 2 of 4 · blocked 1 · points 8 of 10 · open"\\n`));
+    const headings = ['Goal', 'Why', 'Status', 'What done looks like', 'Key decisions', 'Risks', 'Owners', 'Important links', 'Open questions'];
+    const at = headings.map((h) => t.indexOf(`## ${h}\n`));
+    assert.ok(at.every((i) => i >= 0), `missing heading: ${at}`);
+    assert.deepEqual(at, [...at].sort((a, b) => a - b));
+});
+
+test('brief --init never overwrites an existing brief', () => {
+    const { vault, run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    const p = join(vault, BRIEF);
+    writeFileSync(p, `${readFileSync(p, 'utf8')}\nHand-written status.\n`);
+    const before = readFileSync(p, 'utf8');
+    const again = run('brief', 'demo-001', '--init');
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /^exists /);
+    assert.equal(readFileSync(p, 'utf8'), before);
+});
+
+test('a brief is fresh when nothing changed since it was written', () => {
+    const { run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    const r = run('brief', 'demo-001');
+    assert.match(r.stdout, new RegExp(`demo-001 brief: fresh \\(written ${TODAY}\\)`));
+    assert.doesNotMatch(r.stdout, / - /);
+});
+
+test('a brief goes stale when a child ticket is updated after it was written, and names the ticket', () => {
+    const { vault, run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    backdate(vault, '2026-02-01');
+    assert.match(run('brief', 'demo-001').stdout, /brief: fresh/, 'tickets last touched 2026-01-01 are older');
+    run('log', 'demo-005', 'something happened');
+    const r = run('brief', 'demo-001');
+    assert.match(r.stdout, /brief: stale \(written 2026-02-01\)/);
+    assert.match(r.stdout, /1 ticket\(s\) updated after 2026-02-01: demo-005/);
+    assert.doesNotMatch(r.stdout, /numbers changed/, 'a log line does not change the numbers');
+});
+
+test('a same-day state change is stale through the numbers snapshot', () => {
+    const { run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    run('close', 'demo-005');
+    const r = run('brief', 'demo-001');
+    assert.match(r.stdout, /brief: stale/);
+    assert.match(r.stdout, /numbers changed: brief says "closed 2 of 4 · blocked 1 · points 8 of 10 · open", now "closed 3 of 4/);
+});
+
+test('a brief goes stale when an attributed doc is newer than it (an older doc does not)', () => {
+    const { vault, run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    backdate(vault, '2026-02-01');
+    note(vault, 'Projects/demo/Plans/late.md', '---\nticket: demo-004\nupdated: 2026-03-01\n---\n# Late\n');
+    note(vault, 'Projects/demo/Plans/early.md', '---\nticket: demo-004\nupdated: 2026-01-15\n---\n# Early\n');
+    const r = run('brief', 'demo-001');
+    assert.match(r.stdout, /brief: stale/);
+    assert.match(r.stdout, /1 doc\(s\) updated after 2026-02-01: Projects\/demo\/Plans\/late\.md/);
+    assert.doesNotMatch(r.stdout, /early\.md/);
+});
+
+test('brief --refresh restamps updated and basis only, and the verdict is fresh again', () => {
+    const { vault, run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    const p = join(vault, BRIEF);
+    writeFileSync(p, readFileSync(p, 'utf8').replace('One paragraph, written for someone who has not looked in a week.', 'Hand-written status.'));
+    backdate(vault, '2026-02-01');
+    run('close', 'demo-005');
+    assert.match(run('brief', 'demo-001').stdout, /stale/);
+    const r = run('brief', 'demo-001', '--refresh');
+    assert.equal(r.status, 0, r.stderr);
+    const t = readFileSync(p, 'utf8');
+    assert.match(t, new RegExp(`updated: ${TODAY}\\nbasis: "closed 3 of 4 `));
+    assert.match(t, /Hand-written status\./);
+    assert.match(run('brief', 'demo-001').stdout, /brief: fresh/);
+    assert.equal(run('brief', 'demo-002', '--refresh').status, 0, 'refresh on a missing brief is a verdict, not a crash');
+});
+
+test('brief rejects an unknown ticket, a missing id, --init with --refresh, and unknown flags', () => {
+    const { run } = sampleTree();
+    const unknown = run('brief', 'demo-999');
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /No such ticket: demo-999/);
+    assert.equal(run('brief').status, 1);
+    assert.equal(run('brief', 'demo-001', '--init', '--refresh').status, 1);
+    assert.equal(run('brief', 'demo-001', '--force').status, 1);
+});
+
+test('the brief lives in the epic\'s own project and shows up in docs as a brief', () => {
+    const { vault, run, runIn } = sampleTree();
+    put(vault, 'other', 'other-001', { parent: 'demo-001' });
+    assert.equal(runIn('other', 'brief', 'other-001', '--init').status, 0);
+    assert.equal(existsSync(join(vault, 'Projects/other/Briefs/other-001.md')), true);
+    run('brief', 'demo-001', '--init');
+    const j = JSON.parse(run('docs', 'demo-001', '--json').stdout);
+    assert.equal(j.groups[0].kind, 'brief');
+    assert.deepEqual(j.groups[0].items.map((i) => i.path).sort(), ['Projects/demo/Briefs/demo-001.md', 'Projects/other/Briefs/other-001.md']);
+});

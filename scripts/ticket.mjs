@@ -30,6 +30,7 @@
  *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
  *   ticket.mjs attach <note> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
  *   ticket.mjs docs <epic-id> [--json]        # docs attributed to an epic or anything under it, by kind
+ *   ticket.mjs brief <epic-id> [--init | --refresh]   # per-epic brief: staleness verdict, scaffold, or restamp
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -1076,6 +1077,89 @@ function cmdDocs() {
     console.log(`\n${docs.length} doc(s)`);
 }
 
+// ── Epic brief ────────────────────────────────────────────────────────────────
+// One short note per epic at Projects/<epic's project>/Briefs/<epic-id>.md. Its
+// frontmatter records a snapshot (`basis`) and a written-at date (`updated`), so
+// whether it has gone stale is computed from the tickets and docs, never claimed.
+
+/** The epic's numbers as one comparable line. */
+function briefBasis(forest, id) {
+    const r = forest.roll(id);
+    return `closed ${r.closed} of ${r.total} · blocked ${r.blocked} · points ${r.ptsDone} of ${r.ptsTotal} · ${forest.byId.get(id).frontmatter.status}`;
+}
+
+function briefPath(epic) {
+    const project = relative(join(vault, 'Projects'), epic.path).split(sep)[0];
+    return join(vault, 'Projects', project, 'Briefs', `${epic.frontmatter.id}.md`);
+}
+
+function renderBrief(epic, basis) {
+    const id = epic.frontmatter.id;
+    return [
+        '---', 'kind: brief', `epic: ${yamlStr(id)}`, `title: ${yamlStr(epic.frontmatter.title)}`,
+        `updated: ${today()}`, `basis: ${yamlStr(basis)}`, `owner: ${yamlStr(DECIDER)}`, '---',
+        `# ${id} brief`, '',
+        '## Goal', '', 'One sentence.', '',
+        '## Why', '', 'Two or three sentences: who is waiting and what it costs to wait.', '',
+        '## Status', '', 'One paragraph, written for someone who has not looked in a week.', '',
+        '## What done looks like', '', `See [[${id}]] (canonical).`, '',
+        '## Key decisions', '', '- YYYY-MM-DD: the decision in one line, with a link', '',
+        '## Risks', '', '- risk: likelihood, impact, what would tell us early', '',
+        '## Owners', '', '- decider, builder, reviewer', '',
+        '## Important links', '', '- [[a plan]] · [[a runbook]] · [label](https://...)', '',
+        '## Open questions', '', '- question, recommended answer, who decides', '',
+    ].join('\n');
+}
+
+/** Why the brief is out of date, or [] when it is current. Compares ISO dates as strings. */
+function briefStaleness(forest, epic, brief) {
+    const id = epic.frontmatter.id;
+    const since = String(brief.frontmatter.updated ?? '');
+    const reasons = [];
+    const basis = briefBasis(forest, id);
+    if (brief.frontmatter.basis !== basis) reasons.push(`numbers changed: brief says "${brief.frontmatter.basis ?? 'nothing'}", now "${basis}"`);
+    const newer = (items) => (items.length > 5 ? `${items.slice(0, 5).join(', ')} and ${items.length - 5} more` : items.join(', '));
+    const tickets = forest.walk([id]).map((e) => e.t).filter((t) => String(t.frontmatter.updated) > since).map((t) => t.frontmatter.id);
+    if (tickets.length) reasons.push(`${tickets.length} ticket(s) updated after ${since}: ${newer(tickets)}`);
+    const docs = epicDocs(forest, id).filter((d) => d.updated && d.updated > since).map((d) => d.path);
+    if (docs.length) reasons.push(`${docs.length} doc(s) updated after ${since}: ${newer(docs)}`);
+    return reasons;
+}
+
+function cmdBrief() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs brief <epic-id> [--init | --refresh]'); process.exit(1); }
+    if (has('init') && has('refresh')) { console.error('Pass --init or --refresh, not both.'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    const epic = forest.byId.get(id);
+    if (!epic) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const path = briefPath(epic);
+    const brief = existsSync(path) ? readTicket(path) : null;
+
+    if (has('init')) {
+        if (brief) { console.log(`exists  ${path} (not overwritten)`); return; }
+        if (!dryRun) mkdirSync(join(path, '..'), { recursive: true });
+        console.log(`${writeFile(path, renderBrief(epic, briefBasis(forest, id)))}  ${path}`);
+        return;
+    }
+    if (!brief) { console.log(`${id} brief: missing\nCreate it with: ticket.mjs brief ${id} --init`); return; }
+
+    if (has('refresh')) {
+        const { lines, tail, rest } = splitFrontmatter(brief.raw);
+        if (!lines) { console.error(`${path} has no frontmatter to refresh.`); process.exit(1); }
+        setLine(lines, 'updated', today());
+        setLine(lines, 'basis', yamlStr(briefBasis(forest, id)));
+        console.log(`${writeFile(path, `---\n${lines.join('\n')}${tail}${rest}`)}  ${path}`);
+        console.log('Only updated and basis were rewritten; revisit Status and the other sections.');
+        return;
+    }
+
+    const reasons = briefStaleness(forest, epic, brief);
+    console.log(`${id} brief: ${reasons.length ? 'stale' : 'fresh'} (written ${brief.frontmatter.updated ?? 'undated'})\n${path}`);
+    for (const r of reasons) console.log(`  - ${r}`);
+    if (reasons.length) console.log(`Rewrite what changed, then: ticket.mjs brief ${id} --refresh`);
+}
+
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
@@ -1090,6 +1174,7 @@ const FLAGS = {
     show: [],
     attach: ['ticket', 'kind'],
     docs: ['json'],
+    brief: ['init', 'refresh'],
     index: [],
 };
 
@@ -1121,9 +1206,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs, brief: cmdBrief };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|docs|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|docs|brief|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);
