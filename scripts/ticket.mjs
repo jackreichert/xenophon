@@ -29,6 +29,7 @@
  *   ticket.mjs list --decisions               # tickets waiting on a decision
  *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
  *   ticket.mjs attach <note> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
+ *   ticket.mjs docs <epic-id> [--json]        # docs attributed to an epic or anything under it, by kind
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
@@ -1006,6 +1007,75 @@ function cmdAttach() {
     console.log(`${writeFile(doc.abs, attributeNote(readFileSync(doc.abs, 'utf8'), id, kind))}  ${doc.abs}`);
 }
 
+/** Every note with frontmatter under Projects/ (not Tickets, symlinks or secret names), one scan. */
+function vaultDocs() {
+    const root = join(vault, 'Projects');
+    const out = [];
+    const walk = (dir) => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+            if (e.isSymbolicLink() || e.name.startsWith('.') || SECRET_NAME.test(e.name) || e.name === 'Tickets') continue;
+            const p = join(dir, e.name);
+            if (e.isDirectory()) walk(p);
+            else if (e.name.endsWith('.md')) {
+                const d = readTicket(p);
+                if (d) out.push({ ...d, rel: relative(vault, p).split(sep).join('/') });
+            }
+        }
+    };
+    if (existsSync(root)) walk(root);
+    return out;
+}
+
+const FOLDER_KIND = { plans: 'plan', research: 'research', reviews: 'review', runbooks: 'runbook', briefs: 'brief' };
+
+/** `kind:` wins, then a `type:` that is a kind, then the folder the note sits in, else other. */
+function docKind(d) {
+    const fm = d.frontmatter;
+    return [fm.kind, fm.type].find((k) => DOC_KINDS.includes(k))
+        ?? d.rel.split('/').slice(0, -1).map((s) => FOLDER_KIND[s.toLowerCase()]).find(Boolean) ?? 'other';
+}
+
+/** `updated`, else `last-updated`, `date`, `created`; null when the note carries none (never invented). */
+function docDate(d) {
+    for (const k of ['updated', 'last-updated', 'date', 'created']) {
+        const v = String(d.frontmatter[k] ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+        if (v) return v[0];
+    }
+    return null;
+}
+
+function docTitle(d) {
+    const fm = d.frontmatter;
+    if (typeof fm.title === 'string' && fm.title) return fm.title;
+    return d.body.match(/^#\s+(.+?)\s*$/m)?.[1] ?? basename(d.rel, '.md');
+}
+
+/** Notes naming the epic or any ticket under it (any depth, any project), newest first. */
+function epicDocs(forest, epicId) {
+    const tree = new Set(forest.walk([epicId]).map((e) => e.t.frontmatter.id));
+    return vaultDocs().filter((d) => docTicketIds(d.frontmatter).some((id) => tree.has(id)))
+        .map((d) => ({ title: docTitle(d), kind: docKind(d), updated: docDate(d), path: d.rel, tickets: docTicketIds(d.frontmatter) }))
+        .sort((a, b) => String(b.updated).localeCompare(String(a.updated)) || a.path.localeCompare(b.path));
+}
+
+const KIND_ORDER = ['brief', 'plan', 'uat', 'runbook', 'review', 'research', 'decision', 'other'];
+
+function cmdDocs() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs docs <epic-id> [--json]'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    if (!forest.byId.has(id)) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const docs = epicDocs(forest, id);
+    const groups = KIND_ORDER.map((kind) => ({ kind, items: docs.filter((d) => d.kind === kind) })).filter((g) => g.items.length);
+    if (has('json')) { console.log(JSON.stringify({ epic: id, groups }, null, 2)); return; }
+    if (!docs.length) { console.log(`No docs attributed to ${id} or anything under it.`); return; }
+    for (const g of groups) {
+        console.log(`${g.kind} (${g.items.length})`);
+        for (const d of g.items) console.log(`  ${d.updated ?? 'undated   '}  ${d.title}  ${d.path}`);
+    }
+    console.log(`\n${docs.length} doc(s)`);
+}
+
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
@@ -1019,6 +1089,7 @@ const FLAGS = {
     promote: [],
     show: [],
     attach: ['ticket', 'kind'],
+    docs: ['json'],
     index: [],
 };
 
@@ -1050,9 +1121,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|docs|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);

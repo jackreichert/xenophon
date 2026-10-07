@@ -603,3 +603,71 @@ test('attach refuses paths outside Projects, ticket notes, non-markdown, secret 
     assert.equal(readFileSync(join(vault, 'Projects/demo/Plans/real.md'), 'utf8'), '# real\n');
     assert.doesNotMatch(readFileSync(join(vault, 'Projects/demo/Tickets/demo-001.md'), 'utf8'), /ticket:/, 'ticket note untouched');
 });
+
+// ── Supporting docs: docs ─────────────────────────────────────────────────────
+function docsFixture() {
+    const s = sampleTree();
+    put(s.vault, 'other', 'other-001', { parent: 'demo-005' });
+    note(s.vault, 'Projects/demo/Plans/rollout.md', '---\ntitle: "Rollout plan"\nticket: demo-001\nupdated: 2026-10-02\n---\n# x\n');
+    note(s.vault, 'Projects/demo/Research/probe.md', '---\ntickets: [demo-006, demo-004]\ntype: research\nlast-updated: 2026-09-20\n---\n# Probe notes\n');
+    note(s.vault, 'Projects/other/Runbooks/cutover.md', '---\nticket: other-001\nkind: uat\nupdated: 2026-10-05\n---\nbody\n');
+    note(s.vault, 'Projects/demo/Notes/loose.md', '---\nepic: demo-003\n---\n# Loose note\n');
+    note(s.vault, 'Projects/demo/Plans/elsewhere.md', '---\nticket: demo-006\nupdated: 2026-10-06\n---\n# Not ours\n');
+    note(s.vault, 'Projects/demo/Plans/project-level.md', '---\nticket: none\n---\n# Project level\n');
+    note(s.vault, 'Projects/demo/Plans/unmarked.md', '# No frontmatter\n');
+    return s;
+}
+
+test('docs lists notes for the epic and every descendant, across projects, grouped by kind with title, date and path', () => {
+    const { run } = docsFixture();
+    const r = run('docs', 'demo-001');
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.split('\n');
+    const at = (re) => lines.findIndex((l) => re.test(l));
+    assert.ok(at(/^plan \(1\)/) < at(/^uat \(1\)/) && at(/^uat \(1\)/) < at(/^research \(1\)/) && at(/^research \(1\)/) < at(/^other \(1\)/), r.stdout);
+    assert.match(r.stdout, /2026-10-02 {2}Rollout plan {2}Projects\/demo\/Plans\/rollout\.md/);
+    assert.match(r.stdout, /2026-10-05 {2}cutover {2}Projects\/other\/Runbooks\/cutover\.md/, 'doc on a grandchild in another project; title falls back to the filename');
+    assert.match(r.stdout, /2026-09-20 {2}Probe notes {2}Projects\/demo\/Research\/probe\.md/, 'type: research, last-updated, tickets list');
+    assert.match(r.stdout, /undated {2}Loose note {2}Projects\/demo\/Notes\/loose\.md/, 'epic: alias, no kind, no date');
+    assert.doesNotMatch(r.stdout, /elsewhere|project-level|unmarked/);
+    assert.match(r.stdout, /4 doc\(s\)/);
+});
+
+test('docs is scoped by subtree: a child ticket sees only its own docs', () => {
+    const { run } = docsFixture();
+    const r = run('docs', 'demo-003');
+    assert.match(r.stdout, /cutover/);
+    assert.match(r.stdout, /Loose note/);
+    assert.doesNotMatch(r.stdout, /Rollout plan/);
+});
+
+test('docs --json carries kind, title, updated, path per item in group order', () => {
+    const { run } = docsFixture();
+    const j = JSON.parse(run('docs', 'demo-001', '--json').stdout);
+    assert.equal(j.epic, 'demo-001');
+    assert.deepEqual(j.groups.map((g) => g.kind), ['plan', 'uat', 'research', 'other']);
+    assert.deepEqual(j.groups[0].items, [{ title: 'Rollout plan', kind: 'plan', updated: '2026-10-02', path: 'Projects/demo/Plans/rollout.md', tickets: ['demo-001'] }]);
+    assert.equal(j.groups[3].items[0].updated, null);
+});
+
+test('docs infers kind from the folder when neither kind nor type say, and sees notes attached by attach', () => {
+    const { vault, run } = docsFixture();
+    note(vault, 'Projects/demo/Reviews/r1.md', '# Review one\n');
+    assert.equal(run('attach', 'Projects/demo/Reviews/r1.md', '--ticket', 'demo-005').status, 0);
+    const j = JSON.parse(run('docs', 'demo-001', '--json').stdout);
+    assert.equal(j.groups.find((g) => g.kind === 'review').items[0].path, 'Projects/demo/Reviews/r1.md');
+});
+
+test('docs reports a leaf with a doc, none, an unknown ticket, and ignores symlinks, ticket notes and secret names', () => {
+    const { vault, run } = docsFixture();
+    assert.match(run('docs', 'demo-006').stdout, /elsewhere/);
+    assert.match(run('docs', 'demo-002').stdout, /No docs attributed/);
+    const unknown = run('docs', 'demo-999');
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /No such ticket: demo-999/);
+    note(vault, 'Projects/demo/Plans/.env', '---\nticket: demo-002\n---\n');
+    symlinkSync(join(vault, 'Projects/demo/Plans/rollout.md'), join(vault, 'Projects/demo/Plans/alias.md'));
+    assert.match(run('docs', 'demo-002').stdout, /No docs attributed/);
+    assert.doesNotMatch(run('docs', 'demo-001').stdout, /alias\.md/);
+    assert.equal(run('docs').status, 1);
+});
