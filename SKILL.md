@@ -2,7 +2,7 @@
 name: xenophon
 description: File, update, close and browse project tickets as flat markdown notes in the Obsidian vault. Trigger on xenophon, file a ticket, open a ticket, log a bug, raise an issue, track this as work, close that ticket, what tickets are open, what should I work on next, or any request to record follow-up work durably rather than in a throwaway TODO list.
 user-invocable: true
-argument-hint: "[new|list|show|close|reopen|set|decide|log|promote] [description or ticket id]"
+argument-hint: "[new|list|show|close|reopen|set|decide|log|promote|attach|docs|brief] [description or ticket id]"
 ---
 
 # Xenophon
@@ -128,6 +128,22 @@ ticket.mjs show repo-001                       # parent, rollup, children table
 - The parent's note holds a generated table of direct children between `<!-- xenophon:children -->` markers; `index` and `show` refresh it and leave everything else alone. Do not hand-edit inside the markers.
 - `close` on a ticket with open descendants warns and exits non-zero; pass `--force` only when that is intended.
 - A hand-edited parent loop is reported and ignored rather than breaking listing; fix the `parent:` line and re-run `index`.
+
+## Supporting docs and the epic brief
+
+A vault note you write for a ticket (plan, research, review, runbook, UAT) names that ticket in its own frontmatter; the epic is found by walking parents, so name the most specific ticket, not the epic. Do this before you report. Never put a docs list on a ticket: ticket frontmatter is rewritten from a fixed key set and would drop it.
+
+```bash
+ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
+ticket.mjs docs <epic-id> [--json]      # docs for the epic and everything under it, by kind
+ticket.mjs brief <epic-id>              # fresh or stale, and why (or: missing)
+ticket.mjs brief <epic-id> --init       # create Projects/<project>/Briefs/<epic-id>.md from the template
+ticket.mjs brief <epic-id> --refresh    # restamp updated and basis only
+```
+
+- `attach` is idempotent (`unchanged` on a repeat), appends a second ticket to `tickets:`, keeps every other frontmatter key and the body, and refuses an unknown ticket, a path outside `Projects/`, symlinks, ticket notes and secret-looking names. `ticket: none` marks a note project-level.
+- A brief is one short note per epic. It records a snapshot of the epic's numbers and a written-at date, and is **stale** when the numbers changed or any ticket under the epic or attributed doc is newer. When your work changes an epic's state, run `brief <epic-id>`; if it says stale or missing, rewrite the Status paragraph (create it with `--init` first), then `--refresh`. `--init` never overwrites.
+- A link outside the vault (a shared UAT document, a design file) goes in the epic ticket's `## Links` section, which `promote` drops.
 
 ## Promoting to a tracker
 
