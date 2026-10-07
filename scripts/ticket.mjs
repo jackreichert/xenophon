@@ -28,13 +28,14 @@
  *   ticket.mjs list --unreviewed              # what still needs a read
  *   ticket.mjs list --decisions               # tickets waiting on a decision
  *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
+ *   ticket.mjs attach <note> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { readConfig } from './config.mjs';
 
 const DEFAULT_VAULT = process.env.VAULT_ROOT || '';
@@ -903,6 +904,108 @@ function cmdShow() {
     }
 }
 
+// ── Supporting docs ───────────────────────────────────────────────────────────
+// A vault note names the ticket(s) it serves in its OWN frontmatter (`ticket:` or
+// `tickets:`, plus an optional `kind:`). Tickets are never edited for this, because
+// their frontmatter is rewritten from a fixed key list and anything extra is lost.
+const DOC_KINDS = ['brief', 'plan', 'research', 'review', 'runbook', 'uat', 'decision', 'other'];
+const SECRET_NAME = /^(\.env(\..*)?|ssm-.*\.json)$/i;
+
+/** Split a note into frontmatter lines and the rest; `lines` is null when there is no frontmatter. */
+function splitFrontmatter(raw) {
+    const m = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+    if (!m) return { lines: null, tail: '', rest: raw };
+    return { lines: m[1].split('\n'), tail: m[0].slice(4 + m[1].length), rest: raw.slice(m[0].length) };
+}
+
+/** Replace the `key:` line, or append one; every other line keeps its place. */
+function setLine(lines, key, value) {
+    const i = lines.findIndex((l) => l.startsWith(`${key}:`));
+    if (i === -1) lines.push(`${key}: ${value}`);
+    else lines[i] = `${key}: ${value}`;
+}
+
+/** Ticket ids a note's frontmatter names (`ticket`, `tickets`, `epic`); `none` means project-level. */
+const docTicketIds = (fm) => [fm.ticket, fm.tickets, fm.epic].flat()
+    .filter((v) => typeof v === 'string' && v && v !== 'none');
+
+/**
+ * Where a note's ticket attribution sits: the ids it names, the line indexes that
+ * hold them (`ticket:`, `tickets:` and the items of a block-style list) and the first of those.
+ */
+function readAttribution(lines) {
+    const ti = lines.findIndex((l) => l.startsWith('ticket:'));
+    const si = lines.findIndex((l) => l.startsWith('tickets:'));
+    const at = [ti, si].filter((i) => i !== -1);
+    const items = [];
+    if (si !== -1 && !lines[si].slice('tickets:'.length).trim()) {
+        for (let i = si + 1; /^\s+-\s/.test(lines[i] ?? ''); i++) items.push(i);
+    }
+    const fm = {
+        ticket: ti === -1 ? undefined : parseScalar(lines[ti].slice('ticket:'.length)),
+        tickets: si === -1 ? undefined : [parseScalar(lines[si].slice('tickets:'.length)), ...items.map((i) => parseScalar(lines[i].replace(/^\s+-\s+/, '')))].flat(),
+    };
+    return { ids: docTicketIds(fm), lines: new Set([...at, ...items]), anchor: at.length ? Math.min(...at) : -1 };
+}
+
+/**
+ * The note's frontmatter lines with `id` added to the tickets it names and, when
+ * given, `kind` set. A second ticket turns `ticket:` into `tickets:` in place.
+ * Nothing else is touched, so a note that already says this comes back identical.
+ */
+function withAttribution(lines, id, kind) {
+    const have = readAttribution(lines);
+    let out = [...lines];
+    if (!have.ids.includes(id)) {
+        const all = [...have.ids, id];
+        const value = all.length === 1 ? `ticket: ${yamlStr(id)}` : `tickets: ${yamlList(all)}`;
+        out = out.flatMap((l, i) => (i === have.anchor ? [value] : []).concat(have.lines.has(i) ? [] : [l]));
+        if (have.anchor === -1) out.push(value);
+    }
+    if (kind) setLine(out, 'kind', kind);
+    return out;
+}
+
+/** Add the attribution to a note's text; creates frontmatter when there is none. */
+function attributeNote(raw, id, kind) {
+    const { lines, tail, rest } = splitFrontmatter(raw);
+    if (!lines) return `---\n${withAttribution([], id, kind).join('\n')}\n---\n${raw}`;
+    return `---\n${withAttribution(lines, id, kind).join('\n')}${tail}${rest}`;
+}
+
+/**
+ * A note under Projects/, as { abs, rel }. Refuses anything that is not a regular
+ * .md file reached without `..` or a symlink, a secret-looking name, and ticket
+ * notes themselves (xenophon owns their frontmatter).
+ */
+function resolveNote(input) {
+    const fail = (why) => { console.error(`${input}: ${why}`); process.exit(1); };
+    const projects = join(vault, 'Projects');
+    if (!existsSync(projects)) fail(`no Projects folder in the vault at ${vault}`);
+    const abs = resolve(isAbsolute(input) ? input : join(vault, input));
+    const rel = relative(resolve(projects), abs);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) fail('must be a note under Projects/ in the vault.');
+    if (!abs.endsWith('.md') || SECRET_NAME.test(basename(abs))) fail('must be a markdown note.');
+    if (rel.split(sep).includes('Tickets')) fail('ticket notes cannot be attached to; use new, set and log.');
+    if (!existsSync(abs)) fail('no such note.');
+    if (lstatSync(abs).isSymbolicLink() || realpathSync(abs) !== join(realpathSync(projects), rel)) fail('symlinks are not followed.');
+    return { abs, rel: rel.split(sep).join('/') };
+}
+
+function cmdAttach() {
+    const note = positional[0];
+    const id = arg('ticket');
+    const kind = arg('kind');
+    if (!note || !id) {
+        console.error(`Usage: ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind ${DOC_KINDS.join('|')}]`);
+        process.exit(1);
+    }
+    if (kind !== null && !DOC_KINDS.includes(kind)) { console.error(`kind must be one of: ${DOC_KINDS.join(', ')}`); process.exit(1); }
+    if (!vaultTickets().some((t) => t.frontmatter.id === id)) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const doc = resolveNote(note);
+    console.log(`${writeFile(doc.abs, attributeNote(readFileSync(doc.abs, 'utf8'), id, kind))}  ${doc.abs}`);
+}
+
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
@@ -915,6 +1018,7 @@ const FLAGS = {
     log: [],
     promote: [],
     show: [],
+    attach: ['ticket', 'kind'],
     index: [],
 };
 
@@ -946,9 +1050,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);

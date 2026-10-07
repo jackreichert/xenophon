@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -498,4 +498,108 @@ test('close needs no --force when every descendant is already closed', () => {
     const r = run('close', 'demo-001');
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stderr, /warning/);
+});
+
+// ── Supporting docs: attach ───────────────────────────────────────────────────
+function note(vault, rel, text) {
+    const path = join(vault, rel);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+    return path;
+}
+const PLAN = 'Projects/demo/Plans/rollout.md';
+
+test('attach stamps ticket and kind into a note that has frontmatter, keeping every other line and the body', () => {
+    const { vault, run } = sampleTree();
+    const text = '---\ntitle: "Rollout: phase 1"\nstatus: draft\ncustom-key: [a, b]\nupdated: 2026-10-01\n---\n# Rollout\n\nBody with --- and `code`.\n';
+    const path = note(vault, PLAN, text);
+    const r = run('attach', PLAN, '--ticket', 'demo-003', '--kind', 'plan');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^updated /);
+    assert.equal(readFileSync(path, 'utf8'),
+        '---\ntitle: "Rollout: phase 1"\nstatus: draft\ncustom-key: [a, b]\nupdated: 2026-10-01\nticket: "demo-003"\nkind: plan\n---\n# Rollout\n\nBody with --- and `code`.\n');
+});
+
+test('attach is idempotent: a second run reports unchanged and leaves the bytes alone', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '---\ntitle: X\n---\nbody\n');
+    run('attach', PLAN, '--ticket', 'demo-001', '--kind', 'plan');
+    const once = readFileSync(path, 'utf8');
+    const again = run('attach', PLAN, '--ticket', 'demo-001', '--kind', 'plan');
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /^unchanged /);
+    assert.equal(readFileSync(path, 'utf8'), once);
+});
+
+test('attaching a second ticket turns ticket into tickets and appends to tickets afterwards', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '---\nticket: demo-001\ntitle: X\n---\nbody\n');
+    run('attach', PLAN, '--ticket', 'demo-003');
+    assert.equal(readFileSync(path, 'utf8'), '---\ntickets: ["demo-001", "demo-003"]\ntitle: X\n---\nbody\n');
+    run('attach', PLAN, '--ticket', 'demo-005');
+    assert.match(readFileSync(path, 'utf8'), /^---\ntickets: \["demo-001", "demo-003", "demo-005"\]\ntitle: X\n---\n/);
+    assert.match(run('attach', PLAN, '--ticket', 'demo-003').stdout, /^unchanged /);
+});
+
+test('attach merges into a block-style tickets list and replaces ticket: none', () => {
+    const { vault, run } = sampleTree();
+    const block = note(vault, PLAN, '---\ntickets:\n  - demo-001\n  - "demo-002"\nkind: runbook\n---\nbody\n');
+    run('attach', PLAN, '--ticket', 'demo-003');
+    assert.equal(readFileSync(block, 'utf8'), '---\ntickets: ["demo-001", "demo-002", "demo-003"]\nkind: runbook\n---\nbody\n');
+    const none = note(vault, 'Projects/demo/Research/r.md', '---\nticket: none\n---\nbody\n');
+    run('attach', 'Projects/demo/Research/r.md', '--ticket', 'demo-001');
+    assert.equal(readFileSync(none, 'utf8'), '---\nticket: "demo-001"\n---\nbody\n');
+});
+
+test('attach changes an existing kind only when --kind is given, and creates frontmatter when there is none', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '---\nkind: research\n---\nbody\n');
+    run('attach', PLAN, '--ticket', 'demo-001');
+    assert.match(readFileSync(path, 'utf8'), /^---\nkind: research\nticket: "demo-001"\n---\n/);
+    run('attach', PLAN, '--ticket', 'demo-001', '--kind', 'review');
+    assert.match(readFileSync(path, 'utf8'), /^---\nkind: review\nticket: "demo-001"\n---\n/);
+    const bare = note(vault, 'Projects/demo/Plans/bare.md', '# Bare\n\ntext\n');
+    run('attach', 'Projects/demo/Plans/bare.md', '--ticket', 'demo-001');
+    assert.equal(readFileSync(bare, 'utf8'), '---\nticket: "demo-001"\n---\n# Bare\n\ntext\n');
+});
+
+test('attach accepts an absolute path and --dry-run writes nothing', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '# Plain\n');
+    assert.match(run('attach', path, '--ticket', 'demo-001', '--dry-run').stdout, /^updated /);
+    assert.equal(readFileSync(path, 'utf8'), '# Plain\n');
+    assert.equal(run('attach', path, '--ticket', 'demo-001').status, 0);
+    assert.match(readFileSync(path, 'utf8'), /ticket: "demo-001"/);
+});
+
+test('attach refuses an unknown ticket, a bad kind, a missing flag and unknown flags, writing nothing', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '# Plain\n');
+    const missing = run('attach', PLAN, '--ticket', 'demo-999');
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /No such ticket: demo-999/);
+    assert.equal(run('attach', PLAN, '--ticket', 'demo-001', '--kind', 'memo').status, 1);
+    assert.equal(run('attach', PLAN).status, 1);
+    assert.equal(run('attach', PLAN, '--ticket', 'demo-001', '--bogus', 'x').status, 1);
+    assert.equal(readFileSync(path, 'utf8'), '# Plain\n');
+});
+
+test('attach refuses paths outside Projects, ticket notes, non-markdown, secret names, missing notes and symlinks', () => {
+    const { vault, run } = sampleTree();
+    note(vault, 'outside.md', '# no\n');
+    note(vault, 'Projects/demo/Plans/.env', 'SECRET=1\n');
+    note(vault, 'Projects/demo/Plans/data.json', '{}\n');
+    note(vault, 'Projects/demo/Plans/real.md', '# real\n');
+    symlinkSync(join(vault, 'Projects/demo/Plans/real.md'), join(vault, 'Projects/demo/Plans/link.md'));
+    symlinkSync(join(vault, 'Projects/demo/Plans'), join(vault, 'Projects/demo/Linked'));
+    const bad = ['outside.md', 'Projects/../outside.md', 'Projects/demo/Tickets/demo-001.md', 'Projects/demo/Plans/.env',
+        'Projects/demo/Plans/data.json', 'Projects/demo/Plans/nope.md', 'Projects/demo/Plans/link.md', 'Projects/demo/Linked/real.md'];
+    for (const rel of bad) {
+        const r = run('attach', rel, '--ticket', 'demo-001');
+        assert.equal(r.status, 1, `${rel} should be refused`);
+        assert.match(r.stderr, new RegExp(rel.replace(/[.]/g, '\\.')));
+    }
+    assert.equal(readFileSync(join(vault, 'outside.md'), 'utf8'), '# no\n');
+    assert.equal(readFileSync(join(vault, 'Projects/demo/Plans/real.md'), 'utf8'), '# real\n');
+    assert.doesNotMatch(readFileSync(join(vault, 'Projects/demo/Tickets/demo-001.md'), 'utf8'), /ticket:/, 'ticket note untouched');
 });
