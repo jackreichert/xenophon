@@ -628,7 +628,7 @@ test('docs lists notes for the epic and every descendant, across projects, group
     assert.match(r.stdout, /2026-10-02 {2}Rollout plan {2}Projects\/demo\/Plans\/rollout\.md/);
     assert.match(r.stdout, /2026-10-05 {2}cutover {2}Projects\/other\/Runbooks\/cutover\.md/, 'doc on a grandchild in another project; title falls back to the filename');
     assert.match(r.stdout, /2026-09-20 {2}Probe notes {2}Projects\/demo\/Research\/probe\.md/, 'type: research, last-updated, tickets list');
-    assert.match(r.stdout, /undated {2}Loose note {2}Projects\/demo\/Notes\/loose\.md/, 'epic: alias, no kind, no date');
+    assert.match(r.stdout, /undated +Loose note {2}Projects\/demo\/Notes\/loose\.md/, 'epic: alias, no kind, no date');
     assert.doesNotMatch(r.stdout, /elsewhere|project-level|unmarked/);
     assert.match(r.stdout, /4 doc\(s\)/);
 });
