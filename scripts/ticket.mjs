@@ -118,8 +118,8 @@ function parseScalar(raw) {
 }
 
 /** Minimal frontmatter reader — sufficient for the shape this script writes. */
-// LF or CRLF, and an empty block (`---` directly followed by `---`).
-const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
+// LF or CRLF, and an empty block (`---` directly followed by `---`), tried first so a later `---` in the body is not taken as the close.
+const FRONTMATTER = /^---\r?\n(?:---|([\s\S]*?)\r?\n---)(?:\r?\n|$)/;
 
 function readTicket(path) {
     const raw = readFileSync(path, 'utf8');

@@ -595,6 +595,14 @@ test('attach refuses a ticket note reached through a differently-cased Tickets f
     }
 });
 
+test('attach on an empty frontmatter block does not swallow the body up to a later --- line', () => {
+    const { vault, run } = sampleTree();
+    const text = '---\n---\nintro\n\n---\n\nafter the rule\n';
+    const path = note(vault, 'Projects/demo/Plans/rule.md', text);
+    assert.equal(run('attach', 'Projects/demo/Plans/rule.md', '--ticket', 'demo-001', '--kind', 'plan').status, 0);
+    assert.equal(readFileSync(path, 'utf8'), '---\nticket: "demo-001"\nkind: plan\n---\nintro\n\n---\n\nafter the rule\n');
+});
+
 test('attach edits an empty or CRLF frontmatter block in place instead of adding a second one', () => {
     const { vault, run } = sampleTree();
     const empty = note(vault, 'Projects/demo/Plans/empty.md', '---\n---\nbody\n');
