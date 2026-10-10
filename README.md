@@ -231,6 +231,28 @@ A hand-edited loop in the `parent` fields is not fatal: the loop is reported on 
 
 Tickets without a parent behave exactly as before, and `index` output is unchanged for a project with no parent links.
 
+## Supporting docs and the epic brief
+
+Plans, research, reviews, runbooks and UAT notes live wherever your vault keeps them. A note says which ticket it serves in **its own frontmatter**, and the epic is found by following parent links upward, so a plan written for a grandchild ticket is listed on the epic without anyone naming the epic. The ticket itself is never edited for this: ticket frontmatter is rewritten from a fixed set of keys, so anything extra on a ticket would be lost.
+
+```bash
+node $T attach Projects/billing-api/Plans/rollout.md --ticket billing-api-014 --kind plan
+node $T attach <ticket> <note-path-or-vault-relative> [--kind plan|research|review|runbook|uat|brief|decision|other]
+node $T attach <note-path-or-vault-relative> --ticket <id> [--kind ...]   # same thing, flag form
+node $T docs billing-api-001 [--json]       # every doc for the epic or anything under it, grouped by kind
+node $T brief billing-api-001               # is the epic's brief fresh or stale, and why
+node $T brief billing-api-001 --init        # create it from the template (never overwrites)
+node $T brief billing-api-001 --refresh     # restamp updated and basis after rewriting it
+```
+
+**attach** adds `ticket: "<id>"` (and `kind:` when given) to the note's frontmatter. Attaching a second ticket turns it into `tickets: ["a", "b"]`; the same ticket twice changes nothing and prints `unchanged`. Every other key, its order and the body are kept, and frontmatter is created when the note has none. It refuses an unknown ticket, a path outside `Projects/`, a symlink, a ticket note and a secret-looking file name. `ticket: none` marks a note as project-level; `epic: <id>` is read as an alias.
+
+**docs** lists the attributed notes with title, updated date and vault-relative path, grouped by kind in the order brief, plan, uat, runbook, review, research, decision, other. The kind is `kind:`, else a `type:` that is a kind, else the folder (`Plans`, `Research`, `Reviews`, `Runbooks`, `Briefs`), else `other`. The date is `updated`, else `last-updated`, `date` or `created`; a note with none shows as `undated`.
+
+**brief** manages one short note per epic at `Projects/<epic's project>/Briefs/<epic-id>.md`: goal, why, status in one paragraph, what done looks like (linked to the ticket), key decisions with dates, risks, owners, important links and open questions. Its frontmatter holds the epic's numbers when it was written (`basis`: closed of total tickets, blocked, points, status) and a written-at date (`updated`). The verdict is computed: the brief is **stale** when the numbers differ from the snapshot, or a ticket under the epic or an attributed doc has a later date than `updated`. `--refresh` rewrites only `updated` and `basis`; the prose is yours.
+
+Links outside the vault (a shared UAT document, a design file) go in the epic ticket's `## Links` section. `promote` leaves that section out, so they never reach a tracker.
+
 ## Frontmatter
 
 The script reads these fields. Keep them well-formed. The rest of the note is free-form markdown.

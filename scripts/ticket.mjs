@@ -28,13 +28,16 @@
  *   ticket.mjs list --unreviewed              # what still needs a read
  *   ticket.mjs list --decisions               # tickets waiting on a decision
  *   ticket.mjs show <id>                      # parent, rollup and children table; refreshes the note
+ *   ticket.mjs attach <note> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
+ *   ticket.mjs docs <epic-id> [--json]        # docs attributed to an epic or anything under it, by kind
+ *   ticket.mjs brief <epic-id> [--init | --refresh]   # per-epic brief: staleness verdict, scaffold, or restamp
  *   ticket.mjs index
  *
  * Common flags: --vault <path> --project <name> --dry-run
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { readConfig } from './config.mjs';
 
 const DEFAULT_VAULT = process.env.VAULT_ROOT || '';
@@ -115,12 +118,15 @@ function parseScalar(raw) {
 }
 
 /** Minimal frontmatter reader — sufficient for the shape this script writes. */
+// LF or CRLF, and an empty block (`---` directly followed by `---`), tried first so a later `---` in the body is not taken as the close.
+const FRONTMATTER = /^---\r?\n(?:---|([\s\S]*?)\r?\n---)(?:\r?\n|$)/;
+
 function readTicket(path) {
     const raw = readFileSync(path, 'utf8');
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+    const m = raw.match(FRONTMATTER);
     if (!m) return null;
     const fm = {};
-    for (const line of m[1].split('\n')) {
+    for (const line of (m[1] ?? '').split(/\r?\n/)) {
         const idx = line.indexOf(':');
         if (idx === -1 || line.startsWith(' ')) continue;
         fm[line.slice(0, idx).trim()] = parseScalar(line.slice(idx + 1));
@@ -903,6 +909,269 @@ function cmdShow() {
     }
 }
 
+// ── Supporting docs ───────────────────────────────────────────────────────────
+// A vault note names the ticket(s) it serves in its OWN frontmatter (`ticket:` or
+// `tickets:`, plus an optional `kind:`). Tickets are never edited for this, because
+// their frontmatter is rewritten from a fixed key list and anything extra is lost.
+const DOC_KINDS = ['brief', 'plan', 'research', 'review', 'runbook', 'uat', 'decision', 'other'];
+const SECRET_NAME = /^(\.env(\..*)?|ssm-.*\.json)$/i;
+
+/**
+ * Split a note into frontmatter lines and the rest; `lines` is null when there is no frontmatter.
+ * `eol` is the note's own line ending, so rewritten lines match; `tail` is the closing fence.
+ */
+function splitFrontmatter(raw) {
+    const m = raw.match(FRONTMATTER);
+    if (!m) return { lines: null, eol: '\n', tail: '', rest: raw };
+    const eol = m[0].startsWith('---\r\n') ? '\r\n' : '\n';
+    const lines = m[1] === undefined || m[1] === '' ? [] : m[1].split(/\r?\n/);
+    const closing = m[0].slice(m[0].lastIndexOf('---'));
+    return { lines, eol, tail: `${eol}${closing}`, rest: raw.slice(m[0].length) };
+}
+
+/** Replace the `key:` line, or append one; every other line keeps its place. */
+function setLine(lines, key, value) {
+    const i = lines.findIndex((l) => l.startsWith(`${key}:`));
+    if (i === -1) lines.push(`${key}: ${value}`);
+    else lines[i] = `${key}: ${value}`;
+}
+
+/** Ticket ids a note's frontmatter names (`ticket`, `tickets`, `epic`); `none` means project-level. */
+const docTicketIds = (fm) => [fm.ticket, fm.tickets, fm.epic].flat()
+    .filter((v) => typeof v === 'string' && v && v !== 'none');
+
+/**
+ * Where a note's ticket attribution sits: the ids it names, the line indexes that
+ * hold them (`ticket:`, `tickets:` and the items of a block-style list) and the first of those.
+ */
+function readAttribution(lines) {
+    const ti = lines.findIndex((l) => l.startsWith('ticket:'));
+    const si = lines.findIndex((l) => l.startsWith('tickets:'));
+    const at = [ti, si].filter((i) => i !== -1);
+    const items = [];
+    if (si !== -1 && !lines[si].slice('tickets:'.length).trim()) {
+        for (let i = si + 1; /^\s+-\s/.test(lines[i] ?? ''); i++) items.push(i);
+    }
+    const fm = {
+        ticket: ti === -1 ? undefined : parseScalar(lines[ti].slice('ticket:'.length)),
+        tickets: si === -1 ? undefined : [parseScalar(lines[si].slice('tickets:'.length)), ...items.map((i) => parseScalar(lines[i].replace(/^\s+-\s+/, '')))].flat(),
+    };
+    return { ids: docTicketIds(fm), lines: new Set([...at, ...items]), anchor: at.length ? Math.min(...at) : -1 };
+}
+
+/**
+ * The note's frontmatter lines with `id` added to the tickets it names and, when
+ * given, `kind` set. A second ticket turns `ticket:` into `tickets:` in place.
+ * Nothing else is touched, so a note that already says this comes back identical.
+ */
+function withAttribution(lines, id, kind) {
+    const have = readAttribution(lines);
+    let out = [...lines];
+    if (!have.ids.includes(id)) {
+        const all = [...have.ids, id];
+        const value = all.length === 1 ? `ticket: ${yamlStr(id)}` : `tickets: ${yamlList(all)}`;
+        out = out.flatMap((l, i) => (i === have.anchor ? [value] : []).concat(have.lines.has(i) ? [] : [l]));
+        if (have.anchor === -1) out.push(value);
+    }
+    if (kind) setLine(out, 'kind', kind);
+    return out;
+}
+
+/** Add the attribution to a note's text; creates frontmatter when there is none. */
+function attributeNote(raw, id, kind) {
+    const { lines, eol, tail, rest } = splitFrontmatter(raw);
+    if (!lines) return `---\n${withAttribution([], id, kind).join('\n')}\n---\n${raw}`;
+    return `---${eol}${withAttribution(lines, id, kind).join(eol)}${tail}${rest}`;
+}
+
+/**
+ * A note under Projects/, as { abs, rel }. Refuses anything that is not a regular
+ * .md file reached without `..` or a symlink, a secret-looking name, and ticket
+ * notes themselves (xenophon owns their frontmatter).
+ */
+function resolveNote(input) {
+    const fail = (why) => { console.error(`${input}: ${why}`); process.exit(1); };
+    const projects = join(vault, 'Projects');
+    if (!existsSync(projects)) fail(`no Projects folder in the vault at ${vault}`);
+    const abs = resolve(isAbsolute(input) ? input : join(vault, input));
+    const rel = relative(resolve(projects), abs);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) fail('must be a note under Projects/ in the vault.');
+    if (!abs.endsWith('.md') || SECRET_NAME.test(basename(abs))) fail('must be a markdown note.');
+    // Case-insensitive: on APFS tickets/ is the same folder as Tickets/.
+    if (rel.split(sep).some((seg) => seg.toLowerCase() === 'tickets')) fail('ticket notes cannot be attached to; use new, set and log.');
+    if (!existsSync(abs)) fail('no such note.');
+    if (lstatSync(abs).isSymbolicLink() || realpathSync(abs) !== join(realpathSync(projects), rel)) fail('symlinks are not followed.');
+    return { abs, rel: rel.split(sep).join('/') };
+}
+
+function cmdAttach() {
+    // Two forms: `attach <note> --ticket <id>` and `attach <ticket> <note>` (what the-maestro tells agents).
+    const kind = arg('kind');
+    const flagged = arg('ticket');
+    const [note, id] = flagged !== null ? [positional[0], flagged] : [positional[1], positional[0]];
+    if (!note || !id || positional.length > (flagged !== null ? 1 : 2)) {
+        console.error(`Usage: ticket.mjs attach <ticket> <note-path-or-vault-relative> [--kind ${DOC_KINDS.join('|')}]\n   or: ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind ...]`);
+        process.exit(1);
+    }
+    if (kind !== null && !DOC_KINDS.includes(kind)) { console.error(`kind must be one of: ${DOC_KINDS.join(', ')}`); process.exit(1); }
+    if (!vaultTickets().some((t) => t.frontmatter.id === id)) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const doc = resolveNote(note);
+    console.log(`${writeFile(doc.abs, attributeNote(readFileSync(doc.abs, 'utf8'), id, kind))}  ${doc.abs}`);
+}
+
+/** Every note with frontmatter under Projects/ (not Tickets, symlinks or secret names), one scan. */
+function vaultDocs() {
+    const root = join(vault, 'Projects');
+    const out = [];
+    const walk = (dir) => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+            if (e.isSymbolicLink() || e.name.startsWith('.') || SECRET_NAME.test(e.name) || e.name === 'Tickets') continue;
+            const p = join(dir, e.name);
+            if (e.isDirectory()) walk(p);
+            else if (e.name.endsWith('.md')) {
+                const d = readTicket(p);
+                if (d) out.push({ ...d, rel: relative(vault, p).split(sep).join('/') });
+            }
+        }
+    };
+    if (existsSync(root)) walk(root);
+    return out;
+}
+
+const FOLDER_KIND = { plans: 'plan', research: 'research', reviews: 'review', runbooks: 'runbook', briefs: 'brief' };
+
+/** `kind:` wins, then a `type:` that is a kind, then the folder the note sits in, else other. */
+function docKind(d) {
+    const fm = d.frontmatter;
+    return [fm.kind, fm.type].find((k) => DOC_KINDS.includes(k))
+        ?? d.rel.split('/').slice(0, -1).map((s) => FOLDER_KIND[s.toLowerCase()]).find(Boolean) ?? 'other';
+}
+
+/** `updated`, else `last-updated`, `date`, `created`; null when the note carries none (never invented). */
+function docDate(d) {
+    for (const k of ['updated', 'last-updated', 'date', 'created']) {
+        const v = String(d.frontmatter[k] ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+        if (v) return v[0];
+    }
+    return null;
+}
+
+function docTitle(d) {
+    const fm = d.frontmatter;
+    if (typeof fm.title === 'string' && fm.title) return fm.title;
+    return d.body.match(/^#\s+(.+?)\s*$/m)?.[1] ?? basename(d.rel, '.md');
+}
+
+/** Notes naming the epic or any ticket under it (any depth, any project), newest first. */
+function epicDocs(forest, epicId) {
+    const tree = new Set(forest.walk([epicId]).map((e) => e.t.frontmatter.id));
+    return vaultDocs().filter((d) => docTicketIds(d.frontmatter).some((id) => tree.has(id)))
+        .map((d) => ({ title: docTitle(d), kind: docKind(d), updated: docDate(d), path: d.rel, tickets: docTicketIds(d.frontmatter) }))
+        .sort((a, b) => String(b.updated).localeCompare(String(a.updated)) || a.path.localeCompare(b.path));
+}
+
+const KIND_ORDER = ['brief', 'plan', 'uat', 'runbook', 'review', 'research', 'decision', 'other'];
+
+function cmdDocs() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs docs <epic-id> [--json]'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    if (!forest.byId.has(id)) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const docs = epicDocs(forest, id);
+    const groups = KIND_ORDER.map((kind) => ({ kind, items: docs.filter((d) => d.kind === kind) })).filter((g) => g.items.length);
+    if (has('json')) { console.log(JSON.stringify({ epic: id, groups }, null, 2)); return; }
+    if (!docs.length) { console.log(`No docs attributed to ${id} or anything under it.`); return; }
+    for (const g of groups) {
+        console.log(`${g.kind} (${g.items.length})`);
+        for (const d of g.items) console.log(`  ${d.updated ?? 'undated   '}  ${d.title}  ${d.path}`);
+    }
+    console.log(`\n${docs.length} doc(s)`);
+}
+
+// ── Epic brief ────────────────────────────────────────────────────────────────
+// One short note per epic at Projects/<epic's project>/Briefs/<epic-id>.md. Its
+// frontmatter records a snapshot (`basis`) and a written-at date (`updated`), so
+// whether it has gone stale is computed from the tickets and docs, never claimed.
+
+/** The epic's numbers as one comparable line. */
+function briefBasis(forest, id) {
+    const r = forest.roll(id);
+    return `closed ${r.closed} of ${r.total} · blocked ${r.blocked} · points ${r.ptsDone} of ${r.ptsTotal} · ${forest.byId.get(id).frontmatter.status}`;
+}
+
+function briefPath(epic) {
+    const project = relative(join(vault, 'Projects'), epic.path).split(sep)[0];
+    return join(vault, 'Projects', project, 'Briefs', `${epic.frontmatter.id}.md`);
+}
+
+function renderBrief(epic, basis) {
+    const id = epic.frontmatter.id;
+    return [
+        '---', 'kind: brief', `epic: ${yamlStr(id)}`, `title: ${yamlStr(epic.frontmatter.title)}`,
+        `updated: ${today()}`, `basis: ${yamlStr(basis)}`, `owner: ${yamlStr(DECIDER)}`, '---',
+        `# ${id} brief`, '',
+        '## Goal', '', 'One sentence.', '',
+        '## Why', '', 'Two or three sentences: who is waiting and what it costs to wait.', '',
+        '## Status', '', 'One paragraph, written for someone who has not looked in a week.', '',
+        '## What done looks like', '', `See [[${id}]] (canonical).`, '',
+        '## Key decisions', '', '- YYYY-MM-DD: the decision in one line, with a link', '',
+        '## Risks', '', '- risk: likelihood, impact, what would tell us early', '',
+        '## Owners', '', '- decider, builder, reviewer', '',
+        '## Important links', '', '- [[a plan]] · [[a runbook]] · [label](https://...)', '',
+        '## Open questions', '', '- question, recommended answer, who decides', '',
+    ].join('\n');
+}
+
+/** Why the brief is out of date, or [] when it is current. Compares ISO dates as strings. */
+function briefStaleness(forest, epic, brief) {
+    const id = epic.frontmatter.id;
+    const since = String(brief.frontmatter.updated ?? '');
+    const now = today(); // a date after today (an event date, say) is not a change yet and --refresh could never clear it
+    const reasons = [];
+    const basis = briefBasis(forest, id);
+    if (brief.frontmatter.basis !== basis) reasons.push(`numbers changed: brief says "${brief.frontmatter.basis ?? 'nothing'}", now "${basis}"`);
+    const newer = (items) => (items.length > 5 ? `${items.slice(0, 5).join(', ')} and ${items.length - 5} more` : items.join(', '));
+    const tickets = forest.walk([id]).map((e) => e.t).filter((t) => String(t.frontmatter.updated) > since && String(t.frontmatter.updated) <= now).map((t) => t.frontmatter.id);
+    if (tickets.length) reasons.push(`${tickets.length} ticket(s) updated after ${since}: ${newer(tickets)}`);
+    const docs = epicDocs(forest, id).filter((d) => d.updated && d.updated > since && d.updated <= now).map((d) => d.path);
+    if (docs.length) reasons.push(`${docs.length} doc(s) updated after ${since}: ${newer(docs)}`);
+    return reasons;
+}
+
+function cmdBrief() {
+    const id = positional[0];
+    if (!id) { console.error('Usage: ticket.mjs brief <epic-id> [--init | --refresh]'); process.exit(1); }
+    if (has('init') && has('refresh')) { console.error('Pass --init or --refresh, not both.'); process.exit(1); }
+    const forest = buildForest(vaultTickets());
+    const epic = forest.byId.get(id);
+    if (!epic) { console.error(`No such ticket: ${id}`); process.exit(1); }
+    const path = briefPath(epic);
+    const brief = existsSync(path) ? readTicket(path) : null;
+
+    if (has('init')) {
+        if (brief) { console.log(`exists  ${path} (not overwritten)`); return; }
+        if (!dryRun) mkdirSync(join(path, '..'), { recursive: true });
+        console.log(`${writeFile(path, renderBrief(epic, briefBasis(forest, id)))}  ${path}`);
+        return;
+    }
+    if (!brief) { console.log(`${id} brief: missing\nCreate it with: ticket.mjs brief ${id} --init`); return; }
+
+    if (has('refresh')) {
+        const { lines, eol, tail, rest } = splitFrontmatter(brief.raw);
+        if (!lines) { console.error(`${path} has no frontmatter to refresh.`); process.exit(1); }
+        setLine(lines, 'updated', today());
+        setLine(lines, 'basis', yamlStr(briefBasis(forest, id)));
+        console.log(`${writeFile(path, `---${eol}${lines.join(eol)}${tail}${rest}`)}  ${path}`);
+        console.log('Only updated and basis were rewritten; revisit Status and the other sections.');
+        return;
+    }
+
+    const reasons = briefStaleness(forest, epic, brief);
+    console.log(`${id} brief: ${reasons.length ? 'stale' : 'fresh'} (written ${brief.frontmatter.updated ?? 'undated'})\n${path}`);
+    for (const r of reasons) console.log(`  - ${r}`);
+    if (reasons.length) console.log(`Rewrite what changed, then: ticket.mjs brief ${id} --refresh`);
+}
+
 const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
@@ -915,6 +1184,9 @@ const FLAGS = {
     log: [],
     promote: [],
     show: [],
+    attach: ['ticket', 'kind'],
+    docs: ['json'],
+    brief: ['init', 'refresh'],
     index: [],
 };
 
@@ -946,9 +1218,9 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow };
+const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs, brief: cmdBrief };
 if (!commands[cmd]) {
-    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|index> [...]`);
+    console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|docs|brief|index> [...]`);
     process.exit(1);
 }
 rejectUnknownFlags(cmd);
