@@ -134,7 +134,8 @@ ticket.mjs show repo-001                       # parent, rollup, children table
 A vault note you write for a ticket (plan, research, review, runbook, UAT) names that ticket in its own frontmatter; the epic is found by walking parents, so name the most specific ticket, not the epic. Do this before you report. Never put a docs list on a ticket: ticket frontmatter is rewritten from a fixed key set and would drop it.
 
 ```bash
-ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
+ticket.mjs attach <ticket> <note-path-or-vault-relative> [--kind plan|research|review|runbook|uat|brief|decision|other]
+ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind ...]   # same thing, flag form
 ticket.mjs docs <epic-id> [--json]      # docs for the epic and everything under it, by kind
 ticket.mjs brief <epic-id>              # fresh or stale, and why (or: missing)
 ticket.mjs brief <epic-id> --init       # create Projects/<project>/Briefs/<epic-id>.md from the template

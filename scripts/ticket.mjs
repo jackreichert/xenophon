@@ -995,11 +995,12 @@ function resolveNote(input) {
 }
 
 function cmdAttach() {
-    const note = positional[0];
-    const id = arg('ticket');
+    // Two forms: `attach <note> --ticket <id>` and `attach <ticket> <note>` (what the-maestro tells agents).
     const kind = arg('kind');
-    if (!note || !id) {
-        console.error(`Usage: ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind ${DOC_KINDS.join('|')}]`);
+    const flagged = arg('ticket');
+    const [note, id] = flagged !== null ? [positional[0], flagged] : [positional[1], positional[0]];
+    if (!note || !id || positional.length > (flagged !== null ? 1 : 2)) {
+        console.error(`Usage: ticket.mjs attach <ticket> <note-path-or-vault-relative> [--kind ${DOC_KINDS.join('|')}]\n   or: ticket.mjs attach <note-path-or-vault-relative> --ticket <id> [--kind ...]`);
         process.exit(1);
     }
     if (kind !== null && !DOC_KINDS.includes(kind)) { console.error(`kind must be one of: ${DOC_KINDS.join(', ')}`); process.exit(1); }

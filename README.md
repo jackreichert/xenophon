@@ -237,7 +237,8 @@ Plans, research, reviews, runbooks and UAT notes live wherever your vault keeps 
 
 ```bash
 node $T attach Projects/billing-api/Plans/rollout.md --ticket billing-api-014 --kind plan
-node $T attach <note-path-or-vault-relative> --ticket <id> [--kind plan|research|review|runbook|uat|brief|decision|other]
+node $T attach <ticket> <note-path-or-vault-relative> [--kind plan|research|review|runbook|uat|brief|decision|other]
+node $T attach <note-path-or-vault-relative> --ticket <id> [--kind ...]   # same thing, flag form
 node $T docs billing-api-001 [--json]       # every doc for the epic or anything under it, grouped by kind
 node $T brief billing-api-001               # is the epic's brief fresh or stale, and why
 node $T brief billing-api-001 --init        # create it from the template (never overwrites)

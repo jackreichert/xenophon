@@ -584,6 +584,21 @@ test('attach refuses an unknown ticket, a bad kind, a missing flag and unknown f
     assert.equal(readFileSync(path, 'utf8'), '# Plain\n');
 });
 
+test('attach accepts the positional <ticket> <note> form and rejects a wrong shape with usage', () => {
+    const { vault, run } = sampleTree();
+    const path = note(vault, PLAN, '---\ntitle: P\n---\nbody\n');
+    const r = run('attach', 'demo-003', PLAN, '--kind', 'plan');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(path, 'utf8'), /ticket: "demo-003"\nkind: plan/);
+    assert.match(run('attach', 'demo-003', PLAN, '--kind', 'plan').stdout, /^unchanged /);
+    for (const args of [['demo-003'], [PLAN, 'demo-003', 'x'], ['demo-003', PLAN, '--ticket', 'demo-001']]) {
+        const bad = run('attach', ...args);
+        assert.equal(bad.status, 1, args.join(' '));
+        assert.match(bad.stderr, /Usage: ticket\.mjs attach <ticket> <note/);
+    }
+    assert.equal(run('attach', 'demo-999', PLAN).status, 1);
+});
+
 test('attach refuses paths outside Projects, ticket notes, non-markdown, secret names, missing notes and symlinks', () => {
     const { vault, run } = sampleTree();
     note(vault, 'outside.md', '# no\n');
