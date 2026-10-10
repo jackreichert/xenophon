@@ -769,6 +769,15 @@ test('a brief goes stale when an attributed doc is newer than it (an older doc d
     assert.doesNotMatch(r.stdout, /early\.md/);
 });
 
+test('a doc dated in the future does not keep the brief stale, and --refresh leaves it fresh', () => {
+    const { vault, run } = sampleTree();
+    run('brief', 'demo-001', '--init');
+    note(vault, 'Projects/demo/UAT/uat.md', '---\nticket: demo-004\nkind: uat\ndate: 2999-01-01\n---\n# UAT\n');
+    assert.match(run('brief', 'demo-001').stdout, /brief: fresh/);
+    run('brief', 'demo-001', '--refresh');
+    assert.match(run('brief', 'demo-001').stdout, /brief: fresh/);
+});
+
 test('brief --refresh restamps updated and basis only, and the verdict is fresh again', () => {
     const { vault, run } = sampleTree();
     run('brief', 'demo-001', '--init');

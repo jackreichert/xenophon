@@ -1116,13 +1116,14 @@ function renderBrief(epic, basis) {
 function briefStaleness(forest, epic, brief) {
     const id = epic.frontmatter.id;
     const since = String(brief.frontmatter.updated ?? '');
+    const now = today(); // a date after today (an event date, say) is not a change yet and --refresh could never clear it
     const reasons = [];
     const basis = briefBasis(forest, id);
     if (brief.frontmatter.basis !== basis) reasons.push(`numbers changed: brief says "${brief.frontmatter.basis ?? 'nothing'}", now "${basis}"`);
     const newer = (items) => (items.length > 5 ? `${items.slice(0, 5).join(', ')} and ${items.length - 5} more` : items.join(', '));
-    const tickets = forest.walk([id]).map((e) => e.t).filter((t) => String(t.frontmatter.updated) > since).map((t) => t.frontmatter.id);
+    const tickets = forest.walk([id]).map((e) => e.t).filter((t) => String(t.frontmatter.updated) > since && String(t.frontmatter.updated) <= now).map((t) => t.frontmatter.id);
     if (tickets.length) reasons.push(`${tickets.length} ticket(s) updated after ${since}: ${newer(tickets)}`);
-    const docs = epicDocs(forest, id).filter((d) => d.updated && d.updated > since).map((d) => d.path);
+    const docs = epicDocs(forest, id).filter((d) => d.updated && d.updated > since && d.updated <= now).map((d) => d.path);
     if (docs.length) reasons.push(`${docs.length} doc(s) updated after ${since}: ${newer(docs)}`);
     return reasons;
 }
