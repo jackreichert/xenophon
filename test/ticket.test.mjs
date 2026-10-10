@@ -407,7 +407,7 @@ test('without --project inside a git repo the repo directory name is the project
     assert.ok(existsSync(join(vault, 'Projects', 'inferred-repo', 'Tickets', 'inferred-repo-001.md')));
 });
 
-test('a deep chain and a wide tree list well under a second and roll up fully', () => {
+test('a deep chain and a wide tree list at about the cost of a flat list and roll up fully', () => {
     const { vault, run, runIn } = setup();
     put(vault, 'demo', 'demo-0001', { points: 1 });
     for (let i = 2; i <= 201; i++) put(vault, 'demo', `demo-${String(i).padStart(4, '0')}`, { parent: `demo-${String(i - 1).padStart(4, '0')}` });
@@ -415,6 +415,12 @@ test('a deep chain and a wide tree list well under a second and roll up fully', 
         put(vault, 'wide', `wide-${i}`);
         for (let j = 0; j < 100; j++) put(vault, 'wide', `wideleaf-${i * 100 + j}`, { parent: `wide-${i}` });
     }
+    // Baseline: a flat listing reads and parses the same files once. The tree listing may cost a small
+    // multiple of it; a quadratic re-parse would not. A ratio holds on slow or loaded machines where a
+    // fixed wall-clock bound does not.
+    const timed = (fn) => { const t = process.hrtime.bigint(); const r = fn(); return [r, Number(process.hrtime.bigint() - t) / 1e6]; };
+    const [flat, flatMs] = timed(() => runIn('wide', 'list', '--status', 'all'));
+    assert.equal(flat.status, 0, flat.stderr);
     const t0 = Date.now();
     const chain = run('list', '--tree', '--under', 'demo-0001');
     assert.equal(chain.status, 0, chain.stderr);
@@ -423,7 +429,9 @@ test('a deep chain and a wide tree list well under a second and roll up fully', 
     const wide = runIn('wide', 'list', '--tree');
     assert.equal(wide.status, 0, wide.stderr);
     assert.match(wide.stdout, /wide-29 .*▣ 0\/100 closed/);
-    assert.ok(Date.now() - t0 < 2000, `two tree listings of ~3200 tickets took ${Date.now() - t0}ms`);
+    const treeMs = Date.now() - t0;
+    assert.ok(treeMs < 30000, `two tree listings took ${treeMs}ms, over the 30s hang guard`);
+    assert.ok(treeMs < Math.max(flatMs, 100) * 10, `two tree listings took ${treeMs}ms against ${flatMs.toFixed(0)}ms for one flat listing`);
 });
 
 test('a hand-edited cycle is reported and its closing edge ignored; nothing hangs or crashes', () => {
