@@ -30,7 +30,7 @@ ln -s ~/.claude/skills/xenophon ~/.copilot/skills/xenophon
 
 Start a new agent session and ask it to file a ticket. If it does not load the skill, that harness is not reading the directory you symlinked. Add a symlink. Do not copy the files.
 
-Nothing else is installed. `scripts/ticket.mjs` uses only Node built-ins. `git` is used only to infer the project name from the current repo. Pass `--project` when you are not inside that repo.
+Nothing else is installed. `scripts/ticket.mjs` uses only Node built-ins. `git` is used only to infer the project name from the current repo. Pass `--project` when you are not inside that repo; outside a git repo the script refuses to guess and exits with an error naming `--project`.
 
 ## Set the vault
 
@@ -67,7 +67,7 @@ Use the same `VAULT_ROOT` as the-maestro if you install both. Tickets then sit b
 Most of this skill is already generic. The few local choices are yours to set, not the package's to guess.
 
 1. **Vault path.** That is `VAULT_ROOT` above. Do not write your path into `SKILL.md` or `ticket.mjs` if you might publish the fork.
-2. **Project name.** Inside a git repo the script uses the repo directory name. From a multi-repo parent, that inference is wrong, so always pass `--project <repo-name>`. The folder under `Projects/` should match the repo name.
+2. **Project name.** Inside a git repo the script uses the repo directory name. Outside a git repo there is nothing to infer from, so the script exits with an error asking for `--project <repo-name>`; from a directory that is inside some other repo the inference names that repo, so pass `--project <repo-name>` there too. The folder under `Projects/` should match the repo name.
 3. **Issue-tracker pointer, optional.** `--external` is a string you choose (`tracker-1234`, a URL, nothing). It is not synced anywhere. If your repos require a tracker key in branch names, keep using that key. A vault id such as `billing-api-014` is not a substitute.
 4. **Who marks a ticket read.** `new` sets `reviewed: false`. You mark it read with `set <id> --reviewed`. Leave that as the rule unless you want agents to stamp tickets read, which hides the unread backlog.
 
@@ -84,7 +84,7 @@ $VAULT_ROOT/Projects/{repo-name}/
         Archive/{repo-name}-002.md     # closed tickets
 ```
 
-The project folder name should be the git repo name, so tickets sit beside that project's `CONTEXT.md`. From a container directory that is not itself a git repo, always pass `--project`. Inference uses `git rev-parse --show-toplevel`, which is the wrong answer at a multi-repo root.
+The project folder name should be the git repo name, so tickets sit beside that project's `CONTEXT.md`. From a container directory that is not itself a git repo, `--project` is required: with no `--project` and no git repo the script exits with an error. Inference uses `git rev-parse --show-toplevel`.
 
 ## Filing a ticket
 

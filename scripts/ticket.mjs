@@ -70,14 +70,19 @@ if (!vault) {
     process.exit(1);
 }
 
+/** The git repo directory name, or null when the cwd is not inside a git repo. */
 function repoName() {
     try {
-        return basename(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
+        return basename(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
     } catch {
-        return basename(process.cwd());
+        return null;
     }
 }
-const project = arg('project', repoName());
+const project = arg('project') ?? repoName();
+if (!project) {
+    console.error('Cannot infer the project: the current directory is not inside a git repo. Pass --project <repo-name>.');
+    process.exit(1);
+}
 
 const config = readConfig(vault);
 /** Who the Decisions section is addressed to; empty means a generic heading. */

@@ -388,6 +388,25 @@ test('with no parents anywhere nothing changes: no rollup, no arrows, same index
     assert.equal(run('list', '--tree').stdout.split('\n').filter((l) => l.startsWith('demo-')).length, 2);
 });
 
+test('without --project outside a git repo it fails naming --project and writes nothing', () => {
+    const { vault } = setup();
+    const cwd = mkdtempSync(join(tmpdir(), 'xenophon-nogit-'));
+    const r = spawnSync('node', [SCRIPT, 'list', '--vault', vault], { encoding: 'utf8', cwd });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /Cannot infer the project.*--project/);
+    assert.equal(existsSync(join(vault, 'Projects')), false);
+});
+
+test('without --project inside a git repo the repo directory name is the project', () => {
+    const { vault } = setup();
+    const cwd = join(mkdtempSync(join(tmpdir(), 'xenophon-git-')), 'inferred-repo');
+    mkdirSync(cwd);
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd }).status, 0);
+    const r = spawnSync('node', [SCRIPT, ...BASE, '--vault', vault], { encoding: 'utf8', cwd });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(vault, 'Projects', 'inferred-repo', 'Tickets', 'inferred-repo-001.md')));
+});
+
 test('a deep chain and a wide tree list well under a second and roll up fully', () => {
     const { vault, run, runIn } = setup();
     put(vault, 'demo', 'demo-0001', { points: 1 });
