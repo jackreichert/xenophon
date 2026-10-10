@@ -584,6 +584,17 @@ test('attach refuses an unknown ticket, a bad kind, a missing flag and unknown f
     assert.equal(readFileSync(path, 'utf8'), '# Plain\n');
 });
 
+test('attach refuses a ticket note reached through a differently-cased Tickets folder', () => {
+    const { vault, run } = sampleTree();
+    const tpath = join(vault, 'Projects/demo/Tickets/demo-001.md');
+    const before = readFileSync(tpath, 'utf8');
+    for (const rel of ['Projects/demo/tickets/demo-001.md', 'Projects/demo/TICKETS/demo-001.md']) {
+        const r = run('attach', rel, '--ticket', 'demo-001');
+        assert.equal(r.status, 1, rel);
+        assert.equal(readFileSync(tpath, 'utf8'), before, 'ticket note untouched');
+    }
+});
+
 test('attach accepts the positional <ticket> <note> form and rejects a wrong shape with usage', () => {
     const { vault, run } = sampleTree();
     const path = note(vault, PLAN, '---\ntitle: P\n---\nbody\n');

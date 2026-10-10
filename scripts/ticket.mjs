@@ -988,7 +988,8 @@ function resolveNote(input) {
     const rel = relative(resolve(projects), abs);
     if (!rel || rel.startsWith('..') || isAbsolute(rel)) fail('must be a note under Projects/ in the vault.');
     if (!abs.endsWith('.md') || SECRET_NAME.test(basename(abs))) fail('must be a markdown note.');
-    if (rel.split(sep).includes('Tickets')) fail('ticket notes cannot be attached to; use new, set and log.');
+    // Case-insensitive: on APFS tickets/ is the same folder as Tickets/.
+    if (rel.split(sep).some((seg) => seg.toLowerCase() === 'tickets')) fail('ticket notes cannot be attached to; use new, set and log.');
     if (!existsSync(abs)) fail('no such note.');
     if (lstatSync(abs).isSymbolicLink() || realpathSync(abs) !== join(realpathSync(projects), rel)) fail('symlinks are not followed.');
     return { abs, rel: rel.split(sep).join('/') };
