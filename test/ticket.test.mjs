@@ -595,6 +595,18 @@ test('attach refuses a ticket note reached through a differently-cased Tickets f
     }
 });
 
+test('attach edits an empty or CRLF frontmatter block in place instead of adding a second one', () => {
+    const { vault, run } = sampleTree();
+    const empty = note(vault, 'Projects/demo/Plans/empty.md', '---\n---\nbody\n');
+    const crlf = note(vault, 'Projects/demo/Plans/crlf.md', '---\r\ntitle: crlf\r\n---\r\nbody\r\n');
+    assert.equal(run('attach', 'Projects/demo/Plans/empty.md', '--ticket', 'demo-001').status, 0);
+    assert.equal(readFileSync(empty, 'utf8'), '---\nticket: "demo-001"\n---\nbody\n');
+    assert.equal(run('attach', 'Projects/demo/Plans/crlf.md', '--ticket', 'demo-001', '--kind', 'plan').status, 0);
+    assert.equal(readFileSync(crlf, 'utf8'), '---\r\ntitle: crlf\r\nticket: "demo-001"\r\nkind: plan\r\n---\r\nbody\r\n');
+    assert.match(run('attach', 'Projects/demo/Plans/crlf.md', '--ticket', 'demo-001', '--kind', 'plan').stdout, /^unchanged /);
+    assert.match(run('docs', 'demo-001').stdout, /crlf/);
+});
+
 test('attach accepts the positional <ticket> <note> form and rejects a wrong shape with usage', () => {
     const { vault, run } = sampleTree();
     const path = note(vault, PLAN, '---\ntitle: P\n---\nbody\n');

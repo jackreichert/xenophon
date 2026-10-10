@@ -118,12 +118,15 @@ function parseScalar(raw) {
 }
 
 /** Minimal frontmatter reader — sufficient for the shape this script writes. */
+// LF or CRLF, and an empty block (`---` directly followed by `---`).
+const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
+
 function readTicket(path) {
     const raw = readFileSync(path, 'utf8');
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+    const m = raw.match(FRONTMATTER);
     if (!m) return null;
     const fm = {};
-    for (const line of m[1].split('\n')) {
+    for (const line of (m[1] ?? '').split(/\r?\n/)) {
         const idx = line.indexOf(':');
         if (idx === -1 || line.startsWith(' ')) continue;
         fm[line.slice(0, idx).trim()] = parseScalar(line.slice(idx + 1));
@@ -913,11 +916,17 @@ function cmdShow() {
 const DOC_KINDS = ['brief', 'plan', 'research', 'review', 'runbook', 'uat', 'decision', 'other'];
 const SECRET_NAME = /^(\.env(\..*)?|ssm-.*\.json)$/i;
 
-/** Split a note into frontmatter lines and the rest; `lines` is null when there is no frontmatter. */
+/**
+ * Split a note into frontmatter lines and the rest; `lines` is null when there is no frontmatter.
+ * `eol` is the note's own line ending, so rewritten lines match; `tail` is the closing fence.
+ */
 function splitFrontmatter(raw) {
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?/);
-    if (!m) return { lines: null, tail: '', rest: raw };
-    return { lines: m[1].split('\n'), tail: m[0].slice(4 + m[1].length), rest: raw.slice(m[0].length) };
+    const m = raw.match(FRONTMATTER);
+    if (!m) return { lines: null, eol: '\n', tail: '', rest: raw };
+    const eol = m[0].startsWith('---\r\n') ? '\r\n' : '\n';
+    const lines = m[1] === undefined || m[1] === '' ? [] : m[1].split(/\r?\n/);
+    const closing = m[0].slice(m[0].lastIndexOf('---'));
+    return { lines, eol, tail: `${eol}${closing}`, rest: raw.slice(m[0].length) };
 }
 
 /** Replace the `key:` line, or append one; every other line keeps its place. */
@@ -970,9 +979,9 @@ function withAttribution(lines, id, kind) {
 
 /** Add the attribution to a note's text; creates frontmatter when there is none. */
 function attributeNote(raw, id, kind) {
-    const { lines, tail, rest } = splitFrontmatter(raw);
+    const { lines, eol, tail, rest } = splitFrontmatter(raw);
     if (!lines) return `---\n${withAttribution([], id, kind).join('\n')}\n---\n${raw}`;
-    return `---\n${withAttribution(lines, id, kind).join('\n')}${tail}${rest}`;
+    return `---${eol}${withAttribution(lines, id, kind).join(eol)}${tail}${rest}`;
 }
 
 /**
@@ -1148,11 +1157,11 @@ function cmdBrief() {
     if (!brief) { console.log(`${id} brief: missing\nCreate it with: ticket.mjs brief ${id} --init`); return; }
 
     if (has('refresh')) {
-        const { lines, tail, rest } = splitFrontmatter(brief.raw);
+        const { lines, eol, tail, rest } = splitFrontmatter(brief.raw);
         if (!lines) { console.error(`${path} has no frontmatter to refresh.`); process.exit(1); }
         setLine(lines, 'updated', today());
         setLine(lines, 'basis', yamlStr(briefBasis(forest, id)));
-        console.log(`${writeFile(path, `---\n${lines.join('\n')}${tail}${rest}`)}  ${path}`);
+        console.log(`${writeFile(path, `---${eol}${lines.join(eol)}${tail}${rest}`)}  ${path}`);
         console.log('Only updated and basis were rewritten; revisit Status and the other sections.');
         return;
     }
