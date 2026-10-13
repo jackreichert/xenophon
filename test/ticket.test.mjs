@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, symlinkSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -13,6 +13,7 @@ function setup() {
     const clean = { ...process.env };
     delete clean.XENOPHON_DECIDER;
     delete clean.XENOPHON_CONFIG;
+    delete clean.MITHRIL_DONE_CHECK;
     const run = (...a) => runWith({}, ...a);
     const runIn = (proj, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', proj], { encoding: 'utf8', env: clean });
     const runWith = (env, ...a) => spawnSync('node', [SCRIPT, ...a, '--vault', vault, '--project', 'demo'], { encoding: 'utf8', env: { ...clean, ...env } });
@@ -21,6 +22,25 @@ function setup() {
     return { vault, run, runIn, runWith, file, read };
 }
 
+
+/** A local stub. Close tests never call a real mithril install. */
+function writeDoneStub(dir, name, code, lines) {
+    const script = join(dir, name);
+    const log = join(dir, `${name}.argv`);
+    const echoes = lines.map((l) => `echo ${JSON.stringify(l)}`).join('\n');
+    writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\n${echoes}\nexit ${code}\n`);
+    chmodSync(script, 0o755);
+    return { script, log };
+}
+
+function shipArgs(vault) {
+    const table = join(vault, 'done-table-ship.tsv');
+    if (!existsSync(join(vault, 'done-check-ship.sh'))) {
+        writeDoneStub(vault, 'done-check-ship.sh', 0, ['Done verdict: SHIP IT']);
+        writeFileSync(table, '1\tDONE\tcheck\tevidence\n');
+    }
+    return ['--done-check', join(vault, 'done-check-ship.sh'), '--done-table', table];
+}
 const BASE = ['new', '--title', 'Retry storm on checkout', '--problem', 'Retries fan out.', '--done', 'One retry per request.'];
 
 // ── Template rendering ────────────────────────────────────────────────────────
@@ -484,11 +504,11 @@ test('the children table is idempotent and everything outside the markers is pre
 });
 
 test('index refreshes the table of a parent in another project when a child changes', () => {
-    const { run, runIn, read } = setup();
+    const { vault, run, runIn, read } = setup();
     run(...PARENT);
     runIn('other', ...CHILD, '--parent', 'demo-001', '--points', '2');
     assert.match(read('demo-001'), /\[\[other-001\]\] \| open/);
-    runIn('other', 'close', 'other-001');
+    runIn('other', 'close', 'other-001', ...shipArgs(vault));
     assert.match(read('demo-001'), /\[\[other-001\]\] \| closed/);
 });
 
@@ -511,20 +531,135 @@ test('close refuses a ticket with open descendants (any depth, any project) unle
     assert.match(r.stderr, /--force/);
     assert.equal(existsSync(file('demo-001')), true, 'nothing moved');
     assert.doesNotMatch(read('demo-001'), /status: "closed"/);
-    const f = run('close', 'demo-001', '--force');
+    const f = run('close', 'demo-001', '--force', ...shipArgs(vault));
     assert.equal(f.status, 0, f.stderr);
     assert.match(f.stderr, /3 open descendant/);
     assert.match(read('demo-001', true), /status: "closed"/);
-    assert.equal(runIn('other', 'close', 'other-001').status, 0, 'a leaf closes without --force');
+    assert.equal(runIn('other', 'close', 'other-001', ...shipArgs(vault)).status, 0, 'a leaf closes without --force');
 });
 
 test('close needs no --force when every descendant is already closed', () => {
-    const { run } = sampleTree();
-    assert.equal(run('close', 'demo-005').status, 0);
-    assert.equal(run('close', 'demo-003').status, 0);
-    const r = run('close', 'demo-001');
+    const { vault, run } = sampleTree();
+    const ship = shipArgs(vault);
+    assert.equal(run('close', 'demo-005', ...ship).status, 0);
+    assert.equal(run('close', 'demo-003', ...ship).status, 0);
+    const r = run('close', 'demo-001', ...ship);
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stderr, /warning/);
+});
+
+const BODY_MARKER = 'BODY-MARKER-do-not-print';
+
+function plant(vault, id = 'demo-901') {
+    put(vault, 'demo', id);
+    const path = join(vault, 'Projects', 'demo', 'Tickets', `${id}.md`);
+    writeFileSync(path, `${readFileSync(path, 'utf8')}\n## What done looks like\n\n${BODY_MARKER}\n`);
+    return path;
+}
+
+test('close runs done-check verdict and SHIP IT closes without printing the ticket body', () => {
+    const s = setup();
+    const path = plant(s.vault);
+    const { script, log } = writeDoneStub(s.vault, 'ship.sh', 0, [BODY_MARKER, 'Done verdict: SHIP IT']);
+    const table = join(s.vault, 'table.tsv');
+    writeFileSync(table, '1\tDONE\tcheck\tevidence\n');
+    const r = s.run('close', 'demo-901', '--reason', 'fixed', '--done-check', script, '--done-table', table);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(s.read('demo-901', true), /status: "closed"/);
+    assert.match(s.read('demo-901', true), /## Resolution\n\nfixed/);
+    assert.equal(existsSync(path), false);
+    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /BODY-MARKER/);
+    assert.equal(readFileSync(log, 'utf8'), `verdict\n${table}\n${path}\n`);
+});
+
+test('close refuses NEEDS WORK, including with --force, and leaves the ticket open', () => {
+    const s = setup();
+    plant(s.vault, 'demo-901');
+    put(s.vault, 'demo', 'demo-902', { parent: 'demo-901' });
+    const { script } = writeDoneStub(s.vault, 'needs.sh', 1, [BODY_MARKER, '| 1 | NOT DONE | check | evidence |', 'Done verdict: NEEDS WORK']);
+    const table = join(s.vault, 'table.tsv');
+    writeFileSync(table, '1\tNOT DONE\tcheck\tevidence\n');
+    const before = s.read('demo-901');
+    const r = s.run('close', 'demo-901', '--force', '--done-check', script, '--done-table', table);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^Done verdict: NEEDS WORK$/m);
+    assert.match(r.stderr, /open descendant/);
+    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /BODY-MARKER|NOT DONE/);
+    assert.equal(s.read('demo-901'), before);
+    assert.equal(existsSync(s.file('demo-901', true)), false);
+});
+
+test('close refuses when the done-check script is missing and writes nothing', () => {
+    const s = setup();
+    plant(s.vault);
+    const before = s.read('demo-901');
+    const table = join(s.vault, 'table.tsv');
+    writeFileSync(table, '1\tDONE\tcheck\tevidence\n');
+    const missing = s.run('close', 'demo-901', '--done-check', join(s.vault, 'missing.sh'), '--done-table', table);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /done-check\.sh not found/);
+    assert.doesNotMatch(`${missing.stdout}\n${missing.stderr}`, /BODY-MARKER/);
+    assert.equal(s.read('demo-901'), before);
+    assert.equal(existsSync(s.file('demo-901', true)), false);
+    const fromEnv = s.runWith({ MITHRIL_DONE_CHECK: join(s.vault, 'also-missing.sh') }, 'close', 'demo-901', '--done-table', table);
+    assert.equal(fromEnv.status, 1);
+    assert.match(fromEnv.stderr, /done-check\.sh not found/);
+    assert.equal(s.read('demo-901'), before);
+    const sibling = join(dirname(SCRIPT), '..', '..', 'mithril', 'scripts', 'done-check.sh');
+    if (!existsSync(sibling)) {
+        const unset = s.run('close', 'demo-901', '--done-table', table);
+        assert.equal(unset.status, 1);
+        assert.match(unset.stderr, /done-check\.sh not found/);
+        assert.equal(s.read('demo-901'), before);
+    }
+});
+
+test('close refuses when the verdict table is missing and writes nothing', () => {
+    const s = setup();
+    plant(s.vault);
+    const before = s.read('demo-901');
+    const { script, log } = writeDoneStub(s.vault, 'ship.sh', 0, ['Done verdict: SHIP IT']);
+    const omitted = s.run('close', 'demo-901', '--done-check', script);
+    assert.equal(omitted.status, 1);
+    assert.match(omitted.stderr, /verdict table missing/);
+    assert.equal(existsSync(log), false, 'script is not run without a table');
+    assert.equal(s.read('demo-901'), before);
+    const gone = s.run('close', 'demo-901', '--done-check', script, '--done-table', join(s.vault, 'no-table.tsv'));
+    assert.equal(gone.status, 1);
+    assert.match(gone.stderr, /verdict table missing/);
+    assert.doesNotMatch(`${gone.stdout}\n${gone.stderr}`, /BODY-MARKER/);
+    assert.equal(s.read('demo-901'), before);
+    assert.equal(existsSync(s.file('demo-901', true)), false);
+});
+
+test('close refuses a flagged ticket and prints only the flagged line', () => {
+    const s = setup();
+    plant(s.vault);
+    const before = s.read('demo-901');
+    const { script } = writeDoneStub(s.vault, 'flagged.sh', 2, [BODY_MARKER, 'Done check: flagged, ticket has no done section']);
+    const table = join(s.vault, 'table.tsv');
+    writeFileSync(table, '1\tDONE\tcheck\tevidence\n');
+    const r = s.run('close', 'demo-901', '--done-check', script, '--done-table', table);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /^Done check: flagged, ticket has no done section$/m);
+    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /BODY-MARKER/);
+    assert.equal(s.read('demo-901'), before);
+    assert.equal(existsSync(s.file('demo-901', true)), false);
+});
+
+test('MITHRIL_DONE_CHECK is used when --done-check is omitted', () => {
+    const s = setup();
+    const path = plant(s.vault);
+    const { script, log } = writeDoneStub(s.vault, 'env.sh', 0, ['Done verdict: SHIP IT']);
+    const table = join(s.vault, 'table.tsv');
+    writeFileSync(table, '1\tDONE\tcheck\tevidence\n');
+    const blocked = s.runWith({ MITHRIL_DONE_CHECK: script }, 'close', 'demo-901', '--done-check', join(s.vault, 'missing.sh'), '--done-table', table);
+    assert.equal(blocked.status, 1);
+    assert.equal(existsSync(log), false, 'an explicit missing path does not fall through to the env script');
+    const ok = s.runWith({ MITHRIL_DONE_CHECK: script }, 'close', 'demo-901', '--done-table', table);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(s.read('demo-901', true), /status: "closed"/);
+    assert.equal(readFileSync(log, 'utf8'), `verdict\n${table}\n${path}\n`);
 });
 
 // ── Supporting docs: attach ───────────────────────────────────────────────────
@@ -807,9 +942,9 @@ test('a brief goes stale when a child ticket is updated after it was written, an
 });
 
 test('a same-day state change is stale through the numbers snapshot', () => {
-    const { run } = sampleTree();
+    const { vault, run } = sampleTree();
     run('brief', 'demo-001', '--init');
-    run('close', 'demo-005');
+    run('close', 'demo-005', ...shipArgs(vault));
     const r = run('brief', 'demo-001');
     assert.match(r.stdout, /brief: stale/);
     assert.match(r.stdout, /numbers changed: brief says "closed 2 of 4 · blocked 1 · points 8 of 10 · open", now "closed 3 of 4/);
@@ -842,7 +977,7 @@ test('brief --refresh restamps updated and basis only, and the verdict is fresh 
     const p = join(vault, BRIEF);
     writeFileSync(p, readFileSync(p, 'utf8').replace('One paragraph, written for someone who has not looked in a week.', 'Hand-written status.'));
     backdate(vault, '2026-02-01');
-    run('close', 'demo-005');
+    run('close', 'demo-005', ...shipArgs(vault));
     assert.match(run('brief', 'demo-001').stdout, /stale/);
     const r = run('brief', 'demo-001', '--refresh');
     assert.equal(r.status, 0, r.stderr);
