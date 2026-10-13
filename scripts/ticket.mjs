@@ -443,6 +443,7 @@ function renderDecision(n, d) {
     ].join('\n');
 }
 
+const SIZING_NOTE = '> One ticket, one PR: if this will not fit one PR (about 5 code files, 400 lines), split it into smaller tickets before building. A develop/staging twin is one PR; a stack is acceptable, but a separate unit of work is better as its own ticket.';
 const INTERNAL_NOTE = '> Internal. Stripped by `ticket.mjs promote`.';
 
 function renderTemplate(spec) {
@@ -454,6 +455,7 @@ function renderTemplate(spec) {
         ['What done looks like', spec.done],
         spec.accept.length && ['Acceptance criteria', bullets(spec.accept, '- [ ] ')],
         spec.out.length && ['Out of scope', bullets(spec.out)],
+        ['Sizing', SIZING_NOTE],
         spec.points !== null && ['Estimate', `${Number(spec.points)} story point${Number(spec.points) === 1 ? '' : 's'}`],
         [DECISIONS_TITLE, `${INTERNAL_NOTE}\n\n${spec.decisions.length
             ? spec.decisions.map((d, i) => renderDecision(i + 1, d)).join('\n') : 'None'}`],
