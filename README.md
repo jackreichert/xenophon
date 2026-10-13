@@ -113,7 +113,7 @@ node ~/.claude/skills/xenophon/scripts/ticket.mjs new \
   --link "PR 118"
 ```
 
-`--problem` and `--done` are required. `--decision` is repeatable and needs four parts separated by ` | `: the decision, the options, a recommendation, the stakes. `--scope`, `--accept`, `--out`, `--evidence` and `--link` are repeatable too. `--points` must be on the scale (`1,2,3,5` by default; set `XENOPHON_POINTS=1,2,3,5,8` to change it).
+`--problem` and `--done` are required. `--decision` is repeatable and needs four parts separated by ` | `: the decision, the options, a recommendation, the stakes. `--scope`, `--accept`, `--out`, `--evidence` and `--link` are repeatable too. `--points` must be on the scale (`1,2,3,5` by default; set `XENOPHON_POINTS=1,2,3,5,8` to change it). Size a ticket to one PR: work that will not fit one PR is split into smaller tickets before filing (a develop/staging twin counts as one PR; a stack is acceptable, but a separate unit of work is better as its own ticket), and every templated ticket carries a short `## Sizing` note saying so.
 
 ## The template
 

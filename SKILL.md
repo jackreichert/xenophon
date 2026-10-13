@@ -48,6 +48,7 @@ A ticket is only worth filing if someone else could act on it. Gather:
 - **What done looks like** — the observable finished state. Required. If it is unclear, ask before filing; never write `_TBD_`.
 - **Acceptance criteria, scope, out of scope** — when you know them
 - **Estimate** — story points, if you can size it
+- **Size** — one ticket is one PR. If the work will not fit one PR (about 5 code files, 400 lines, or more than 3 points), split it into smaller tickets before filing, linked with `--parent` when they roll up into one outcome. A develop PR and its staging twin count as one PR, and a stack under one ticket is acceptable, but a separate unit of work is better as its own smaller ticket
 - **Decisions needed** — anything the reader must decide: the decision, the options, your recommendation, the stakes
 - **Evidence** — `file:line` and anything *ruled out*, so the next person does not repeat the work
 
@@ -77,7 +78,7 @@ Field rules:
 - `--problem` and `--done` are required. `--scope`, `--accept`, `--out`, `--decision`, `--evidence`, `--link` repeat. Quote every value.
 - `--decision` needs four parts separated by ` | `. With no decisions the section reads `None`. With any, the header shows `Decision needed: yes` and `list --decisions` finds it.
 - The Decisions heading is generic unless a decider is configured (`XENOPHON_DECIDER` or `xenophon-config.md` in the vault); see the README.
-- `--points` must be on the scale (`1,2,3,5`, or `XENOPHON_POINTS`). Anything bigger should be split.
+- `--points` must be on the scale (`1,2,3,5`, or `XENOPHON_POINTS`). Anything bigger should be split: one ticket is one PR.
 - `--type` — `bug`, `task`, `feature`, `epic`, `chore`
 - `--priority` — integer `0`–`4` (0 critical, 2 normal, 4 backlog). Words are rejected.
 - `--labels`, `--blocked-by` — comma-separated, no spaces around the commas
