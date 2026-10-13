@@ -50,8 +50,7 @@ test('new renders the template sections in order with defaults', () => {
         '--evidence', 'src/a.ts:10 - loop', '--link', 'PR 12');
     assert.equal(r.status, 0, r.stderr);
     const t = read('demo-001');
-    const order = ['## Problem', '## Context', '## Scope', '## What done looks like', '## Acceptance criteria', '## Out of scope',
-        '## Estimate', '## Decisions needed', '## Evidence / file:line', '## Links', '## Log'].map((h) => t.indexOf(h));
+    const order = ['## Problem', '## Context', '## Scope', '## What done looks like', '## Acceptance criteria', '## Out of scope', '## Sizing', '## Estimate', '## Decisions needed', '## Evidence / file:line', '## Links', '## Log'].map((h) => t.indexOf(h));
     assert.ok(order.every((i) => i >= 0), `missing section: ${order}`);
     assert.deepEqual(order, [...order].sort((a, b) => a - b));
     assert.match(t, /- \[ \] unit test/);
@@ -1007,4 +1006,13 @@ test('the brief lives in the epic\'s own project and shows up in docs as a brief
     const j = JSON.parse(run('docs', 'demo-001', '--json').stdout);
     assert.equal(j.groups[0].kind, 'brief');
     assert.deepEqual(j.groups[0].items.map((i) => i.path).sort(), ['Projects/demo/Briefs/demo-001.md', 'Projects/other/Briefs/other-001.md']);
+});
+
+test('every templated ticket carries the one-PR sizing note, and promote keeps it internal', () => {
+    const { run, read } = setup();
+    assert.equal(run(...BASE).status, 0);
+    assert.match(read('demo-001'), /## Sizing\n\n> One ticket, one PR/);
+    const p = run('promote', 'demo-001');
+    assert.equal(p.status, 0, p.stderr);
+    assert.doesNotMatch(p.stdout, /Sizing|One ticket, one PR/);
 });
