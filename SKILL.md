@@ -98,7 +98,7 @@ Use `decide` and `log` to add decisions and dated updates, rather than editing t
 
 ```bash
 ticket.mjs set <id> --priority 0 --status in-progress --labels a,b --blocked-by other-004
-ticket.mjs close <id> --reason "What actually fixed it"   # --force if it still has open descendants
+ticket.mjs close <id> --reason "What actually fixed it" --done-table <path>   # --force does not skip the done check
 ticket.mjs reopen <id>
 ticket.mjs decide <id> --decision "decision | options | recommendation | stakes"   # add one
 ticket.mjs decide <id> --clear      # decision made; keeps the record
@@ -107,7 +107,7 @@ ticket.mjs promote <id>             # print tracker-ready markdown; writes nothi
 ticket.mjs index          # rebuild _Index.md after hand-editing frontmatter
 ```
 
-`close` moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. `reopen` moves it back.
+`close` runs `done-check.sh verdict` before it writes. The script is `--done-check`, else `MITHRIL_DONE_CHECK`, else a sibling `mithril` checkout. A missing script or `--done-table` refuses the close and writes nothing. Exit 0 moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. Exit 1 or 2 leaves the ticket open and prints the script's verdict line, not the ticket body. `reopen` moves a closed note back.
 
 Statuses: `open`, `in-progress`, `blocked`, `closed`.
 
@@ -126,7 +126,7 @@ ticket.mjs show repo-001                       # parent, rollup, children table
 - **Ids are scoped by project**: `{project}-NNN` names the project that owns the ticket. A parent is found by id across all projects in the vault, so a child in another project can hang under it. Same vault only.
 - A ticket with children shows a rollup over its whole subtree in `list`, `--tree` and `_Index.md`: `2/4 closed (2 direct), 1 blocked, 8/10 pts`. It is computed on each run from frontmatter, never stored. Leaves show nothing.
 - The parent's note holds a generated table of direct children between `<!-- xenophon:children -->` markers; `index` and `show` refresh it and leave everything else alone. Do not hand-edit inside the markers.
-- `close` on a ticket with open descendants warns and exits non-zero; pass `--force` only when that is intended.
+- `close` on a ticket with open descendants warns and exits non-zero; pass `--force` only when that is intended. `--force` does not skip the done check.
 - A hand-edited parent loop is reported and ignored rather than breaking listing; fix the `parent:` line and re-run `index`.
 
 ## Supporting docs and the epic brief

@@ -20,7 +20,8 @@
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs list --under <id> [--depth N]  # descendants of a ticket (--epic is an alias)
  *   ticket.mjs list --tree [--under <id>] [--depth N]   # ASCII tree with rollups
- *   ticket.mjs close <id> [--reason "..."] [--force]   # --force: close despite open descendants
+ *   ticket.mjs close <id> [--reason "..."] [--force] [--done-check <path>] --done-table <path>
+ *       # --force closes despite open descendants; it does not skip the done check
  *   ticket.mjs reopen <id>
  *   ticket.mjs set <id> --priority 1 --status in-progress --labels a,b
  *   ticket.mjs set <id> --parent <epic-id|none>
@@ -36,8 +37,9 @@
  * Common flags: --vault <path> --project <name> --dry-run
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { join, basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { join, basename, isAbsolute, relative, resolve, sep, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.mjs';
 
 const DEFAULT_VAULT = process.env.VAULT_ROOT || '';
@@ -594,10 +596,65 @@ function cmdNew() {
     console.log(`\n${fm.id}`);
 }
 
+/** mithril checked out beside this repo. No home directory is assumed. */
+function siblingDoneCheck() {
+    const candidate = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'mithril', 'scripts', 'done-check.sh');
+    return existsSync(candidate) ? candidate : null;
+}
+
+/** --done-check, else MITHRIL_DONE_CHECK, else a sibling mithril checkout. No fallthrough once a source is set. */
+function resolveDoneCheck() {
+    const explicit = arg('done-check');
+    if (explicit) return explicit;
+    const fromEnv = (process.env.MITHRIL_DONE_CHECK || '').trim();
+    if (fromEnv) return fromEnv;
+    return siblingDoneCheck();
+}
+
+/** The script's own verdict line, never the rest of its output. */
+function doneVerdictLine(text) {
+    const lines = String(text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const verdicts = lines.filter((l) => l.startsWith('Done verdict:'));
+    if (verdicts.length) return verdicts[verdicts.length - 1];
+    const flagged = lines.filter((l) => l.startsWith('Done check: flagged'));
+    return flagged.length ? flagged[flagged.length - 1] : null;
+}
+
+/**
+ * Run done-check.sh verdict before a close is written. Exit 0 continues;
+ * exit 1 or 2 refuses. This does not parse "What done looks like" itself.
+ * --force does not skip this check.
+ */
+function requireDoneCheck(ticketPath) {
+    const script = resolveDoneCheck();
+    if (!script || !existsSync(script)) {
+        console.error('Done check: refused, done-check.sh not found. Pass --done-check <path> or set MITHRIL_DONE_CHECK.');
+        process.exit(1);
+    }
+    const table = arg('done-table');
+    if (!table || !existsSync(table)) {
+        console.error('Done check: refused, verdict table missing. Pass --done-table <path>.');
+        process.exit(1);
+    }
+    const result = spawnSync(script, ['verdict', table, ticketPath], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.error || result.status == null) {
+        console.error('Done check: flagged, done-check.sh could not be run.');
+        process.exit(2);
+    }
+    if (result.status === 0) return;
+    const line = doneVerdictLine(result.stdout) || doneVerdictLine(result.stderr);
+    if (line) console.error(line);
+    else if (result.status === 2) console.error('Done check: flagged, unreadable');
+    else console.error('Done verdict: NEEDS WORK');
+    process.exit(result.status === 2 ? 2 : 1);
+}
+
 function cmdClose() {
     const id = positional[0];
     if (!id) { console.error('Usage: ticket.mjs close <id>'); process.exit(1); }
-    ensureDirs();
     const t = findTicket(id);
 
     const forest = buildForest(vaultTickets());
@@ -607,6 +664,9 @@ function cmdClose() {
         console.error(`warning: ${id} has ${openBelow.length} open descendant(s): ${list}.`);
         if (!has('force')) { console.error('Close them first, or pass --force to close anyway.'); process.exit(1); }
     }
+
+    requireDoneCheck(t.path);
+    ensureDirs();
 
     t.frontmatter.status = 'closed';
     t.frontmatter.closed = today();
@@ -1182,7 +1242,7 @@ const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
         'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id', 'parent'],
     list: ['status', 'ready', 'label', 'unreviewed', 'decisions', 'under', 'epic', 'depth', 'tree'],
-    close: ['reason', 'force'],
+    close: ['reason', 'force', 'done-check', 'done-table'],
     reopen: [],
     set: ['priority', 'labels', 'blocked-by', 'external', 'title', 'reviewed', 'status', 'parent'],
     decide: ['decision', 'clear'],

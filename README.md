@@ -176,14 +176,14 @@ T=~/.claude/skills/xenophon/scripts/ticket.mjs
 node $T set billing-api-001 --priority 0 --status in-progress --labels a,b
 node $T set billing-api-001 --reviewed              # stamps today
 node $T set billing-api-001 --reviewed no           # back to unreviewed
-node $T close billing-api-001 --reason "What actually fixed it"
+node $T close billing-api-001 --reason "What actually fixed it" --done-table path/to/verdict.tsv
 node $T reopen billing-api-001
 node $T index --project billing-api                 # after hand-editing frontmatter
 ```
 
 Statuses: `open`, `in-progress`, `blocked`, `closed`.
 
-`close` moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. It refuses a ticket with open descendants unless you pass `--force`.
+`close` runs `done-check.sh verdict` before it writes. Find the script with `--done-check`, else `MITHRIL_DONE_CHECK`, else a sibling `mithril` checkout. Pass the verdict table with `--done-table`. A missing script or table refuses the close and writes nothing. Exit 0 moves the note to `Archive/`, stamps `closed:`, and appends a `## Resolution` section when `--reason` is given. Exit 1 or 2 leaves the ticket open. It refuses a ticket with open descendants unless you pass `--force`. `--force` does not skip the done check.
 
 ```bash
 node $T list --project billing-api                   # active work, highest priority first
@@ -225,7 +225,7 @@ Every ticket that has children shows a **rollup** over its whole subtree, in `li
 
 The note of a ticket with children carries a generated table of its direct children, each with its own rollup, between `<!-- xenophon:children -->` and `<!-- /xenophon:children -->`. `index` and `show` regenerate it, including for parents in other projects; re-running changes nothing, and everything outside the markers, and the frontmatter, is left alone. `promote` does not emit it.
 
-`close` refuses a ticket that still has open descendants (any depth, any project), naming them; pass `--force` to close it anyway.
+`close` refuses a ticket that still has open descendants (any depth, any project), naming them; pass `--force` to close it anyway. `--force` does not skip the done check.
 
 A hand-edited loop in the `parent` fields is not fatal: the loop is reported on stderr, the edge that closes it is ignored, and everything else lists as usual. A `parent` naming a ticket that does not exist is treated as no parent. The tree is built in one pass over the vault, so a few thousand tickets list in well under a second.
 
