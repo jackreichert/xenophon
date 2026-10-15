@@ -166,7 +166,7 @@ test('promote prints tracker-ready markdown without internal sections or vault r
 test('promote is read-only and handles legacy tickets', () => {
     const { run, file, read } = setup();
     mkdirSync(dirname(file('demo-900')), { recursive: true });
-    const legacy = '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open` · **Priority** `P2`\n\n#a #b\n\n## Description\n\nbody\n\n## Decision (Jack, 2026-10-01)\n\nship it\n';
+    const legacy = '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open` · **Priority** `P2`\n\n#a #b\n\n## Description\n\nbody\n\n## Decision (Marilla, 2026-10-01)\n\nship it\n';
     writeFileSync(file('demo-900'), legacy);
     const r = run('promote', 'demo-900');
     assert.equal(r.status, 0);
@@ -202,23 +202,23 @@ test('heading is generic by default and takes the decider from env or the config
     assert.match(read('demo-001'), /\n## Decisions needed\n/);
     runWith({ XENOPHON_DECIDER: 'Sam' }, ...BASE);
     assert.match(read('demo-002'), /\n## Decisions needed \(for Sam\)\n/);
-    writeFileSync(join(vault, 'xenophon-config.md'), '# cfg\n\n```xenophon-config\ndecider: Jack   # comment\n```\n');
+    writeFileSync(join(vault, 'xenophon-config.md'), '# cfg\n\n```xenophon-config\ndecider: Marilla   # comment\n```\n');
     run(...BASE);
-    assert.match(read('demo-003'), /\n## Decisions needed \(for Jack\)\n/);
+    assert.match(read('demo-003'), /\n## Decisions needed \(for Marilla\)\n/);
     runWith({ XENOPHON_DECIDER: 'Sam' }, ...BASE);
     assert.match(read('demo-004'), /\(for Sam\)/);
     runWith({ XENOPHON_CONFIG: join(vault, 'missing.md') }, ...BASE);
     assert.match(read('demo-005'), /\n## Decisions needed\n/);
 });
 
-test('decide and promote find the section under any configured name, old "(for Jack)" tickets included', () => {
+test('decide and promote find the section under any configured name, old "(for Marilla)" tickets included', () => {
     const { run, runWith, read } = setup();
-    runWith({ XENOPHON_DECIDER: 'Jack' }, ...BASE);
+    runWith({ XENOPHON_DECIDER: 'Marilla' }, ...BASE);
     // config changed since filing: heading on disk no longer matches the configured one
     assert.equal(runWith({ XENOPHON_DECIDER: 'Sam' }, 'decide', 'demo-001', '--decision', 'Q? | a or b | a | s').status, 0);
     const t = read('demo-001');
     assert.equal((t.match(/## Decisions needed/g) || []).length, 1);
-    assert.match(t, /## Decisions needed \(for Jack\)[\s\S]*1\. \*\*Q\?\*\*/);
+    assert.match(t, /## Decisions needed \(for Marilla\)[\s\S]*1\. \*\*Q\?\*\*/);
     const out = runWith({ XENOPHON_DECIDER: 'Sam' }, 'promote', 'demo-001').stdout;
     assert.ok(!out.includes('Decisions needed') && !out.includes('Q?'));
     assert.equal(run('promote', 'demo-001').stdout, out);
