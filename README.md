@@ -138,7 +138,7 @@ node ~/.claude/skills/xenophon/scripts/ticket.mjs new \
 
 The sections down to Estimate mirror a typical tracker ticket. The last four are internal: they are for the vault reader and are stripped on promotion. Nothing tracker-specific is built in. `Context`, `Scope`, `Acceptance criteria`, `Out of scope` and `Estimate` appear only when given.
 
-Tickets filed with `--body-file -` (a hand-written body) still work and keep their old shape; that flag cannot be combined with the template flags.
+Tickets filed with `--body-file -` (a hand-written body) still work and keep their old shape; that flag cannot be combined with the template flags. The body must carry a `## What done looks like` section with content (not blank, not `_TBD_`, and not inside a code fence). Without one, `new` prints the section to add, exits 1 and writes nothing. There is no flag to skip the check.
 
 ```bash
 node $T decide billing-api-001 --decision "what | options | recommendation | stakes"
@@ -148,7 +148,7 @@ node $T promote billing-api-001                      # print tracker-ready markd
 node $T list --decisions --project billing-api       # tickets waiting on a decision
 ```
 
-`promote` only prints. It keeps only the public sections (Problem, Context, Scope, What done looks like, Acceptance criteria, Out of scope, Estimate; anything else is dropped, with a warning for unrecognised headings), emits only the title from the header block, strips wiki-links, `obsidian://` URIs and the ids of any project in your vault, and warns on stderr about what it removed so you can re-read for dangling sentences. It does not call a tracker and does not touch the ticket. Re-read the output before filing it.
+`promote` only prints, and it refuses (exit 1, nothing printed) a ticket that has no `What done looks like` section with content. It keeps only the public sections (Problem, Context, Scope, What done looks like, Acceptance criteria, Out of scope, Estimate; anything else is dropped, with a warning for unrecognised headings), emits only the title from the header block, strips wiki-links, `obsidian://` URIs and the ids of any project in your vault, and warns on stderr about what it removed so you can re-read for dangling sentences. It does not call a tracker and does not touch the ticket. Re-read the output before filing it.
 
 The new id prints on the last line, as `{project}-NNN`.
 
@@ -159,7 +159,7 @@ Field rules:
 | `--type` | `bug`, `task`, `feature`, `epic`, `chore` |
 | `--priority` | Integer `0`–`4`. `0` is critical, `2` is normal, `4` is backlog. Words are rejected. |
 | `--labels`, `--blocked-by` | Comma-separated, no spaces around the commas. |
-| `--body-file -` | Legacy: read a hand-written body from stdin instead of using the template flags. |
+| `--body-file -` | Legacy: read a hand-written body from stdin instead of using the template flags. The body needs a `## What done looks like` section with content. |
 | `--parent` | Id of an existing ticket to nest under (see Parents, children and rollups). `set` also takes `none`. |
 | `--id` | Only to deliberately reuse an id. Otherwise it is allocated. |
 | `--external` | A pointer to Jira or another tracker. This skill does not sync with it. |

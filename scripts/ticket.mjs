@@ -12,11 +12,11 @@
  *                  [--evidence "file:line - note"]... [--link "..."]...
  *                  [--type bug] [--priority 2] [--labels a,b]
  *                  [--external jira-X] [--blocked-by id1,id2] [--parent <epic-id>]
- *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body
+ *   ticket.mjs new --title "..." --body-file -     # legacy: hand-written body; needs a done section
  *   ticket.mjs decide <id> --decision "what | options | recommendation | stakes"
  *   ticket.mjs decide <id> --clear            # decision made; stops listing as needed
  *   ticket.mjs log <id> "dated update"
- *   ticket.mjs promote <id>                   # print tracker-ready markdown; calls nothing
+ *   ticket.mjs promote <id>                   # print tracker-ready markdown; refuses with no done section
  *   ticket.mjs list [--status open|closed|all] [--ready] [--label x]
  *   ticket.mjs list --under <id> [--depth N]  # descendants of a ticket (--epic is an alias)
  *   ticket.mjs list --tree [--under <id>] [--depth N]   # ASCII tree with rollups
@@ -479,6 +479,21 @@ function splitSections(body) {
     }
     return secs;
 }
+const DONE_TEMPLATE = '## What done looks like\n\n- The observable finished state, in one or two lines (never _TBD_).';
+
+/** True when the body has a "What done looks like" section with real content (not blank, not `_TBD_`). */
+function hasDoneState(body) {
+    return splitSections(body).some((x) => /^what done looks like\b/i.test(x.heading ?? '')
+        && x.lines.join('\n').replace(/_TBD_/gi, '').trim() !== '');
+}
+
+/** Exit 1 with the template when the body has no usable done state. Called before anything is written. */
+function requireDoneState(body, what) {
+    if (hasDoneState(body)) return;
+    console.error(`${what} has no "What done looks like" section with content. Every ticket needs one; add this and try again:\n\n${DONE_TEMPLATE}`);
+    process.exit(1);
+}
+
 const joinSections = (secs) => `${secs.flatMap((x) => (x.line === null ? x.lines : [x.line, ...x.lines])).join('\n').trimEnd()}\n`;
 
 /**
@@ -554,6 +569,7 @@ function cmdNew() {
     }
     if (!legacy) validateSpec(spec);
     const legacyBody = bodyFile === '-' ? readStdin() : bodyFile ? readFileSync(bodyFile, 'utf8') : '';
+    if (legacy) requireDoneState(legacyBody, 'The --body-file body');
 
     const fm = {
         id,
@@ -784,9 +800,7 @@ function cmdPromote() {
     const kept = secs.filter((x) => PUBLIC_HEADING.test(x.heading));
     const dropped = secs.filter((x) => !PUBLIC_HEADING.test(x.heading) && !/^(decisions?\b|evidence|links?\b|log\b|resolution|internal|children\b)/i.test(x.heading));
     if (dropped.length) console.error(`warning: dropped non-public section(s): ${dropped.map((x) => x.heading).join(', ')}.`);
-    if (!kept.some((x) => /^what done looks like/i.test(x.heading))) {
-        console.error('warning: no "What done looks like" section; add one before filing.');
-    }
+    requireDoneState(t.body, `Ticket ${t.frontmatter.id}`);
 
     const projects = existsSync(join(vault, 'Projects')) ? readdirSync(join(vault, 'Projects')) : [];
     const idRe = projects.length

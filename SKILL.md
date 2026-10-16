@@ -84,7 +84,7 @@ Field rules:
 - `--labels`, `--blocked-by` — comma-separated, no spaces around the commas
 - `--parent` — id of an existing ticket to nest under (see "Parents, epics and rollups")
 - The id is allocated automatically as `{project}-NNN`. Pass `--id` only to deliberately reuse one.
-- `--body-file -` is the legacy hand-written path (cannot be mixed with the template flags). Use it only for content that does not fit the template.
+- `--body-file -` is the legacy hand-written path (cannot be mixed with the template flags). Use it only for content that does not fit the template. The body must still carry a `## What done looks like` section with content (not blank, not `_TBD_`); otherwise `new` prints the template, exits 1 and writes nothing. There is no override.
 - `--body-file` is the only body flag. An unknown flag (e.g. `--body`) exits non-zero before anything is written; a typo no longer files a `_TBD_` ticket.
 
 The command prints the new id on its last line.
@@ -149,7 +149,7 @@ ticket.mjs brief <epic-id> --refresh    # restamp updated and basis only
 
 ## Promoting to a tracker
 
-The public sections (down to Estimate) mirror a tracker ticket; Decisions needed, Evidence, Links and Log are internal. `promote <id>` prints the markdown with internal sections and vault references removed. It only prints. Re-read it, then file it in the tracker yourself if you are asked to. Do not cite vault ids in the tracker.
+The public sections (down to Estimate) mirror a tracker ticket; Decisions needed, Evidence, Links and Log are internal. `promote <id>` prints the markdown with internal sections and vault references removed. It only prints, and it exits 1 (printing nothing) for a ticket with no `What done looks like` section; add one and run it again. Re-read it, then file it in the tracker yourself if you are asked to. Do not cite vault ids in the tracker.
 
 ## Review state
 
