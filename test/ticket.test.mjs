@@ -83,11 +83,45 @@ test('incomplete --decision, missing --done, bad --points and mixed --body-file 
 test('--body-file keeps the legacy shape (no template, no decision_needed)', () => {
     const s = setup();
     const out = spawnSync('node', [SCRIPT, 'new', '--title', 'Old style', '--body-file', '-', '--vault', s.vault, '--project', 'demo'],
-        { encoding: 'utf8', input: '## Description\n\nhand written\n' });
+        { encoding: 'utf8', input: '## Description\n\nhand written\n\n## What done looks like\n\nIt is written.\n' });
     assert.equal(out.status, 0, out.stderr);
     const t = s.read('demo-001');
     assert.match(t, /## Description\n\nhand written/);
     assert.doesNotMatch(t, /decision_needed|Decision needed|## Problem/);
+});
+
+// ── Every ticket carries a done state ────────────────────────────────────────
+const stdinNew = (vault, input) => spawnSync('node', [SCRIPT, 'new', '--title', 'Hand', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input, encoding: 'utf8' });
+
+test('new --body-file refuses a body with no done section, shows the template and writes nothing', () => {
+    const { vault } = setup();
+    for (const body of ['## Description\n\nhand written\n', '', '## What done looks like\n\n', '## What done looks like\n\n_TBD_\n',
+        '```\n## What done looks like\n\nfenced\n```\n']) {
+        const r = stdinNew(vault, body);
+        assert.equal(r.status, 1, `body: ${JSON.stringify(body)}`);
+        assert.match(r.stderr, /no "What done looks like" section with content/);
+        assert.match(r.stderr, /## What done looks like\n\n- The observable finished state/);
+    }
+    assert.equal(existsSync(join(vault, 'Projects', 'demo', 'Tickets', 'demo-001.md')), false);
+});
+
+test('new --body-file accepts a body with a done section', () => {
+    const { vault, read } = setup();
+    const r = stdinNew(vault, '## Description\n\nx\n\n## What done looks like\n\n- It ships.\n');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(read('demo-001'), /- It ships\./);
+});
+
+test('promote refuses a ticket with no done section and writes nothing', () => {
+    const { run, file, read } = setup();
+    mkdirSync(dirname(file('demo-903')), { recursive: true });
+    const note = '---\nid: "demo-903"\ntitle: "T"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-903 — T\n\n## Problem\n\np\n\n## What done looks like\n\n_TBD_\n';
+    writeFileSync(file('demo-903'), note);
+    const r = run('promote', 'demo-903');
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /Ticket demo-903 has no "What done looks like" section with content/);
+    assert.equal(read('demo-903'), note);
 });
 
 // ── Browsing ──────────────────────────────────────────────────────────────────
@@ -166,12 +200,11 @@ test('promote prints tracker-ready markdown without internal sections or vault r
 test('promote is read-only and handles legacy tickets', () => {
     const { run, file, read } = setup();
     mkdirSync(dirname(file('demo-900')), { recursive: true });
-    const legacy = '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open` · **Priority** `P2`\n\n#a #b\n\n## Description\n\nbody\n\n## Decision (Marilla, 2026-10-01)\n\nship it\n';
+    const legacy = '---\nid: "demo-900"\ntitle: "Old"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-900 — Old\n\n**Status** `open` · **Priority** `P2`\n\n#a #b\n\n## Description\n\nbody\n\n## What done looks like\n\nshipped\n\n## Decision (Marilla, 2026-10-01)\n\nship it\n';
     writeFileSync(file('demo-900'), legacy);
     const r = run('promote', 'demo-900');
     assert.equal(r.status, 0);
-    assert.equal(r.stdout, '# Old\n\n## Description\n\nbody\n');
-    assert.match(r.stderr, /What done looks like/);
+    assert.equal(r.stdout, '# Old\n\n## Description\n\nbody\n\n## What done looks like\n\nshipped\n');
     assert.equal(read('demo-900'), legacy, 'promote must not write');
 });
 
@@ -189,10 +222,10 @@ test('promote emits only allowlisted headings and only the title from the preamb
 test('promote strips embeds without a stray "!" and keeps the label of obsidian:// links', () => {
     const { run, file } = setup();
     mkdirSync(dirname(file('demo-902')), { recursive: true });
-    writeFileSync(file('demo-902'), '---\nid: "demo-902"\ntitle: "T"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-902 — T\n\n## Problem\n\nSee ![[shot.png]] and [the note](obsidian://open?vault=v&file=n) then [[a]].\n');
+    writeFileSync(file('demo-902'), '---\nid: "demo-902"\ntitle: "T"\nstatus: "open"\nreviewed: false\ntype: "task"\npriority: 2\nlabels: []\nblocked-by: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n# demo-902 — T\n\n## Problem\n\nSee ![[shot.png]] and [the note](obsidian://open?vault=v&file=n) then [[a]].\n\n## What done looks like\n\nd\n');
     const r = run('promote', 'demo-902');
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout, '# T\n\n## Problem\n\nSee  and the note then .\n');
+    assert.equal(r.stdout, '# T\n\n## Problem\n\nSee  and the note then .\n\n## What done looks like\n\nd\n');
 });
 
 // ── Configurable decider ──────────────────────────────────────────────────────
@@ -259,7 +292,7 @@ test('known flags and --body-file - on stdin still work', () => {
     assert.equal(run(...BASE, '--priority', '1', '--labels', 'a').status, 0);
     assert.equal(run('set', 'demo-001', '--priority', '3').status, 0);
     assert.match(read('demo-001'), /priority: 3/);
-    const r = spawnSync('node', [SCRIPT, 'new', '--title', 'Legacy', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input: 'Hand written.', encoding: 'utf8' });
+    const r = spawnSync('node', [SCRIPT, 'new', '--title', 'Legacy', '--body-file', '-', '--vault', vault, '--project', 'demo'], { input: 'Hand written.\n\n## What done looks like\n\nIt reads.\n', encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.match(read('demo-002'), /Hand written\./);
 });
@@ -334,7 +367,7 @@ function put(vault, proj, id, { parent, status = 'open', type = 'task', priority
     const fm = ['---', `id: "${id}"`, `title: "T ${id}"`, `status: "${status}"`, 'reviewed: false', `type: "${type}"`, `priority: ${priority}`,
         'labels: []', 'blocked-by: []', ...(parent ? [`parent: "${parent}"`] : []), 'created: 2026-01-01', 'updated: 2026-01-01', '---', '', `# ${id}`, ''];
     const est = points ? ['## Estimate', '', `${points} story points`, ''] : [];
-    writeFileSync(join(dir, `${id}.md`), [...fm, ...est].join('\n'));
+    writeFileSync(join(dir, `${id}.md`), [...fm, '## What done looks like', '', 'Done.', '', ...est].join('\n'));
 }
 
 function sampleTree() {
