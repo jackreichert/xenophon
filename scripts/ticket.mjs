@@ -224,6 +224,38 @@ function requireValidParent(childId, parentId) {
     if (err) { console.error(err); process.exit(1); }
 }
 
+/** Why `id` may not take `blockers` as its blocked-by list, or null if it may. */
+function blockedByError(id, blockers) {
+    const edges = new Map(vaultTickets().map((t) => [t.frontmatter.id, t.frontmatter['blocked-by'] || []]));
+    for (const b of blockers) {
+        if (!SAFE_ID.test(b) || b.includes('..')) return `invalid blocked-by id: ${b}`;
+        if (b === id) return `${id} cannot block itself.`;
+        if (!edges.has(b)) return `No such blocker ticket: ${b} (looked in the vault at ${vault}).`;
+    }
+    // A cycle exists when some blocker already waits, directly or not, on `id`.
+    for (const b of blockers) {
+        const parentOf = new Map([[b, null]]);
+        const stack = [b];
+        while (stack.length) {
+            const cur = stack.pop();
+            for (const next of edges.get(cur) ?? []) {
+                if (next === id) {
+                    const chain = [id];
+                    for (let at = cur; at !== null; at = parentOf.get(at)) chain.splice(1, 0, at);
+                    return `cycle: ${[...chain, id].join(' -> ')}`;
+                }
+                if (!parentOf.has(next)) { parentOf.set(next, cur); stack.push(next); }
+            }
+        }
+    }
+    return null;
+}
+
+function requireValidBlockers(id, blockers) {
+    const err = blockedByError(id, blockers);
+    if (err) { console.error(err); process.exit(1); }
+}
+
 // ── Tree and rollup ───────────────────────────────────────────────────────────
 // Built once per command from every ticket in the vault. Nothing here is stored:
 // counts are recomputed from the notes' frontmatter each run.
@@ -322,6 +354,55 @@ function buildForest(tickets) {
             return out;
         },
     };
+}
+
+// ── Readiness ─────────────────────────────────────────────────────────────────
+const warnedBlockers = new Set();
+
+/**
+ * The one readiness rule: status exactly `open`, every blocker resolves anywhere
+ * in the vault and is closed (an unknown id is not ready, with a warning), no
+ * unclosed descendant, and no decision pending.
+ */
+function isReady(t, forest) {
+    const fm = t.frontmatter;
+    if (fm.status !== 'open' || fm.decision_needed === true) return false;
+    const roll = forest.roll(fm.id);
+    if (roll && roll.total > roll.closed) return false;
+    return (fm['blocked-by'] || []).every((b) => {
+        const blocker = forest.byId.get(b);
+        if (!blocker) {
+            const key = `${fm.id}>${b}`;
+            if (!warnedBlockers.has(key)) { warnedBlockers.add(key); console.error(`warning: ${fm.id} is blocked by unknown ticket ${b}; treating it as not ready.`); }
+            return false;
+        }
+        return blocker.frontmatter.status === 'closed';
+    });
+}
+
+/** id -> unclosed tickets that list it in blocked-by, from every ticket in the vault. */
+function dependentsMap(forest) {
+    const deps = new Map();
+    for (const t of forest.byId.values()) {
+        if (t.frontmatter.status === 'closed') continue;
+        for (const b of new Set(t.frontmatter['blocked-by'] || [])) {
+            if (!deps.has(b)) deps.set(b, []);
+            deps.get(b).push(t);
+        }
+    }
+    return deps;
+}
+
+/** How many unclosed tickets wait, directly or transitively, on `id`. */
+function unblockCount(deps, id) {
+    const seen = new Set([id]);
+    const stack = [id];
+    while (stack.length) {
+        for (const d of deps.get(stack.pop()) ?? []) {
+            if (!seen.has(d.frontmatter.id)) { seen.add(d.frontmatter.id); stack.push(d.frontmatter.id); }
+        }
+    }
+    return seen.size - 1;
 }
 
 const CHILDREN_START = '<!-- xenophon:children -->';
@@ -559,6 +640,7 @@ function cmdNew() {
     const id = arg('id') || nextId();
     const parent = arg('parent');
     if (parent) requireValidParent(id, parent);
+    requireValidBlockers(id, (arg('blocked-by') || '').split(',').map((x) => x.trim()).filter(Boolean));
 
     const bodyFile = arg('body-file');
     const spec = templateSpec();
@@ -698,6 +780,13 @@ function cmdClose() {
     console.log(`${writeFile(dest, content)}  ${dest}`);
     if (t.path !== dest && !dryRun) rmSync(t.path);
     rebuildIndex();
+
+    // Waiting on this ticket, with nothing else still open in the way.
+    const after = (b) => b !== id && forest.byId.get(b)?.frontmatter.status !== 'closed';
+    const unblocked = (dependentsMap(forest).get(id) ?? [])
+        .filter((d) => d.frontmatter.status === 'open' && !(d.frontmatter['blocked-by'] || []).some(after))
+        .map((d) => d.frontmatter.id).sort();
+    if (unblocked.length) console.log(`Unblocked: ${unblocked.join(', ')}`);
 }
 
 function cmdReopen() {
@@ -723,7 +812,11 @@ function cmdSet() {
 
     if (arg('priority') !== null) t.frontmatter.priority = Number(arg('priority'));
     if (arg('labels') !== null) t.frontmatter.labels = arg('labels').split(',').map((s) => s.trim()).filter(Boolean);
-    if (arg('blocked-by') !== null) t.frontmatter['blocked-by'] = arg('blocked-by').split(',').map((s) => s.trim()).filter(Boolean);
+    if (arg('blocked-by') !== null) {
+        const blockers = arg('blocked-by').split(',').map((x) => x.trim()).filter(Boolean);
+        requireValidBlockers(id, blockers);
+        t.frontmatter['blocked-by'] = blockers;
+    }
     if (arg('external') !== null) t.frontmatter.external = arg('external');
     if (arg('title') !== null) t.frontmatter.title = arg('title');
     if (arg('parent') !== null) {
@@ -847,8 +940,7 @@ function cmdList() {
         if (status === 'active' && fm.status === 'closed') return false;
         if (status !== 'all' && status !== 'active' && fm.status !== status) return false;
         if (label && !(fm.labels || []).includes(label)) return false;
-        // --ready hides anything still waiting on an unclosed blocker.
-        if (has('ready') && (fm['blocked-by'] || []).some((b) => openIds.has(b))) return false;
+        if (has('ready') && !isReady(t, forest)) return false;
         if (has('unreviewed') && fm.reviewed) return false;
         if (has('decisions') && fm.decision_needed !== true) return false;
         return true;
@@ -873,6 +965,35 @@ function cmdList() {
         );
     }
     console.log(`\n${rows.length} ticket(s)`);
+}
+
+/** Tickets that can be picked up now: priority, then most unblocked downstream, then id. */
+function cmdReady() {
+    const forest = buildForest(vaultTickets());
+    const under = arg('under') ?? arg('epic');
+    if (under && !forest.byId.has(under)) { console.error(`No such ticket: ${under}`); process.exit(1); }
+    const limit = arg('limit') === null ? Infinity : Number(arg('limit'));
+    if (!(limit >= 1 && Number.isInteger(limit)) && limit !== Infinity) { console.error('--limit takes an integer >= 1.'); process.exit(1); }
+
+    const pool = under ? forest.walk([under]).slice(1).map((e) => e.t) : allTickets();
+    const deps = dependentsMap(forest);
+    const rows = pool.filter((t) => isReady(t, forest))
+        .map((t) => ({ t, unblocks: unblockCount(deps, t.frontmatter.id) }))
+        .sort((a, b) => (a.t.frontmatter.priority - b.t.frontmatter.priority)
+            || (b.unblocks - a.unblocks) || byPriorityThenId(a.t, b.t))
+        .slice(0, limit);
+
+    if (has('json')) {
+        console.log(JSON.stringify(rows.map(({ t, unblocks }) => ({
+            id: t.frontmatter.id, title: t.frontmatter.title, type: t.frontmatter.type, priority: t.frontmatter.priority, unblocks,
+        })), null, 2));
+        return;
+    }
+    if (!rows.length) { console.log('No ready tickets.'); return; }
+    for (const { t, unblocks } of rows) {
+        const fm = t.frontmatter;
+        console.log(`P${fm.priority}  ${String(fm.id).padEnd(20)} [${String(fm.type).padEnd(7)}] ${fm.title}${unblocks ? `  ⛓ unblocks ${unblocks}` : ''}`);
+    }
 }
 
 /** Tree roots for a whole-project view: tickets of this project whose parent is not also in it. */
@@ -984,6 +1105,8 @@ function cmdShow() {
     console.log(`${fm.id} [${fm.type}] ${fm.status} P${fm.priority}  ${fm.title}`);
     if (parent) console.log(`parent: ${parent}`);
     if (rollup) console.log(`rollup: ${rollup}`);
+    const unblocks = (dependentsMap(forest).get(id) ?? []).map((d) => d.frontmatter.id).sort();
+    if (unblocks.length) console.log(`Unblocks: ${unblocks.join(', ')}`);
     if (forest.children(id).length) {
         console.log(`\n${childrenTable(forest, id).join('\n')}`);
         syncChildrenNote(forest, t);
@@ -1257,6 +1380,7 @@ const COMMON_FLAGS = ['vault', 'project', 'dry-run'];
 const FLAGS = {
     new: ['title', 'problem', 'context', 'scope', 'done', 'accept', 'out', 'points', 'decision', 'evidence', 'link',
         'type', 'priority', 'labels', 'external', 'blocked-by', 'body-file', 'id', 'parent'],
+    ready: ['under', 'epic', 'limit', 'json'],
     list: ['status', 'ready', 'label', 'unreviewed', 'decisions', 'under', 'epic', 'depth', 'tree'],
     close: ['reason', 'force', 'done-check', 'done-table'],
     reopen: [],
@@ -1299,7 +1423,7 @@ function rejectUnknownFlags(command) {
     process.exit(1);
 }
 
-const commands = { new: cmdNew, list: cmdList, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs, brief: cmdBrief };
+const commands = { new: cmdNew, list: cmdList, ready: cmdReady, close: cmdClose, reopen: cmdReopen, set: cmdSet, index: rebuildIndex, decide: cmdDecide, log: cmdLog, promote: cmdPromote, show: cmdShow, attach: cmdAttach, docs: cmdDocs, brief: cmdBrief };
 if (!commands[cmd]) {
     console.error(`Usage: ticket.mjs <new|list|show|close|reopen|set|decide|log|promote|attach|docs|brief|index> [...]`);
     process.exit(1);

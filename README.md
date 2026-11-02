@@ -187,13 +187,16 @@ Statuses: `open`, `in-progress`, `blocked`, `closed`.
 
 ```bash
 node $T list --project billing-api                   # active work, highest priority first
-node $T list --ready --project billing-api           # open, and not waiting on an open blocker
+node $T list --ready --project billing-api           # same rule as ready
+node $T ready --project billing-api --limit 5        # next pick-ups, best first (--under <id>, --json)
 node $T list --status open --project billing-api     # exactly open, not in-progress
 node $T list --unreviewed --project billing-api      # filed but not yet read
 node $T list --label permissions --project billing-api
 ```
 
-`--ready` is the "what can I pick up" view. It hides anything whose `blocked-by` still points at an open ticket.
+`ready` and `list --ready` are the "what can I pick up" view and share one rule. A ticket is ready when its status is exactly `open`, every `blocked-by` id exists anywhere in the vault (any project) and is closed, it has no unclosed descendants, and it has no `decision_needed`. An unknown blocker id is not ready and prints a warning. `ready` orders by priority, then by how many tickets it would transitively unblock (most first), then id.
+
+`new` and `set` refuse a `blocked-by` id that does not exist and any list that would create a dependency cycle. `show` prints an `Unblocks:` line, and `close` prints `Unblocked: a, b` for tickets whose last open blocker was the one just closed.
 
 `new` sets `reviewed: false`. Whoever files the ticket leaves it unreviewed. You mark it read. Unreviewed tickets show as `● unreviewed` in `list` and `**unreviewed**` in `_Index.md`.
 
