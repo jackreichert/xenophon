@@ -1049,3 +1049,90 @@ test('every templated ticket carries the one-PR sizing note, and promote keeps i
     assert.equal(p.status, 0, p.stderr);
     assert.doesNotMatch(p.stdout, /Sizing|One ticket, one PR/);
 });
+
+// ── Ready queue ───────────────────────────────────────────────────────────────
+/** put() plus blocked-by and decision_needed, for readiness fixtures. */
+function putDep(vault, proj, id, { blockedBy = [], decision, ...rest } = {}) {
+    put(vault, proj, id, rest);
+    const file = join(vault, 'Projects', proj, 'Tickets', rest.status === 'closed' ? 'Archive' : '', `${id}.md`);
+    let raw = readFileSync(file, 'utf8').replace('blocked-by: []', `blocked-by: [${blockedBy.map((b) => `"${b}"`).join(', ')}]`);
+    if (decision) raw = raw.replace('type:', 'decision_needed: true\ntype:');
+    writeFileSync(file, raw);
+}
+const readyIds = (r) => r.stdout.split('\n').filter((l) => /^P\d/.test(l)).map((l) => l.split(/\s+/)[1]);
+
+test('ready: a closed blocker in another project counts as done, an open one does not', () => {
+    const { vault, run } = setup();
+    put(vault, 'harbor', 'harbor-001', { status: 'closed' });
+    put(vault, 'harbor', 'harbor-002');
+    putDep(vault, 'demo', 'demo-001', { blockedBy: ['harbor-001'] });
+    putDep(vault, 'demo', 'demo-002', { blockedBy: ['harbor-002'] });
+    assert.deepEqual(readyIds(run('ready')), ['demo-001']);
+});
+
+test('ready: an unknown blocker id is not ready and warns', () => {
+    const { vault, run } = setup();
+    putDep(vault, 'demo', 'demo-001', { blockedBy: ['ghost-9'] });
+    const r = run('ready');
+    assert.match(r.stdout, /No ready tickets/);
+    assert.match(r.stderr, /demo-001 is blocked by unknown ticket ghost-9/);
+    assert.equal(run('list', '--ready').stdout.includes('demo-001'), false);
+});
+
+test('ready: parents with open children, in-progress, blocked and decision tickets are excluded', () => {
+    const { vault, run } = setup();
+    put(vault, 'demo', 'demo-001', { type: 'epic' });
+    put(vault, 'demo', 'demo-002', { parent: 'demo-001' });
+    put(vault, 'demo', 'demo-003', { status: 'in-progress' });
+    put(vault, 'demo', 'demo-004', { status: 'blocked' });
+    putDep(vault, 'demo', 'demo-005', { decision: true });
+    put(vault, 'demo', 'demo-006');
+    assert.deepEqual(readyIds(run('ready')), ['demo-002', 'demo-006']);
+    assert.deepEqual(readyIds(run('list', '--ready')), ['demo-002', 'demo-006']);
+    assert.deepEqual(readyIds(run('ready', '--under', 'demo-001')), ['demo-002']);
+});
+
+test('ready: orders by priority, then transitive unblock count, then id; --limit and --json', () => {
+    const { vault, run } = setup();
+    put(vault, 'demo', 'demo-001', { priority: 1 });
+    put(vault, 'demo', 'demo-002', { priority: 2 });
+    put(vault, 'demo', 'demo-003', { priority: 2 });
+    put(vault, 'demo', 'demo-004', { priority: 2 });
+    putDep(vault, 'demo', 'demo-005', { blockedBy: ['demo-003'], status: 'blocked' });
+    putDep(vault, 'demo', 'demo-006', { blockedBy: ['demo-005'], status: 'blocked' });
+    putDep(vault, 'demo', 'demo-007', { blockedBy: ['demo-004'], status: 'blocked' });
+    // 003 unblocks 005 and 006 (transitive), 004 unblocks 007, 002 none; P1 wins regardless.
+    assert.deepEqual(readyIds(run('ready')), ['demo-001', 'demo-003', 'demo-004', 'demo-002']);
+    assert.deepEqual(readyIds(run('ready', '--limit', '2')), ['demo-001', 'demo-003']);
+    const json = JSON.parse(run('ready', '--json').stdout);
+    assert.deepEqual(json.map((j) => [j.id, j.unblocks]), [['demo-001', 0], ['demo-003', 2], ['demo-004', 1], ['demo-002', 0]]);
+});
+
+test('new and set refuse an unknown blocker and a blocked-by cycle', () => {
+    const { vault, run, read } = setup();
+    put(vault, 'demo', 'demo-001');
+    putDep(vault, 'demo', 'demo-002', { blockedBy: ['demo-001'] });
+    putDep(vault, 'demo', 'demo-003', { blockedBy: ['demo-002'] });
+    let r = run(...BASE, '--blocked-by', 'nope-1');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /No such blocker ticket: nope-1/);
+    assert.equal(existsSync(join(vault, 'Projects', 'demo', 'Tickets', 'demo-004.md')), false);
+    r = run('set', 'demo-001', '--blocked-by', 'demo-003');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cycle: demo-001 -> demo-003 -> demo-002 -> demo-001/);
+    assert.match(read('demo-001'), /blocked-by: \[\]/);
+    assert.equal(run('set', 'demo-001', '--blocked-by', 'demo-001').status, 1);
+    assert.equal(run(...BASE, '--blocked-by', 'demo-001').status, 0);
+});
+
+test('show lists Unblocks and close prints Unblocked for tickets whose last blocker it was', () => {
+    const { vault, run } = setup();
+    put(vault, 'demo', 'demo-001');
+    put(vault, 'demo', 'demo-002');
+    putDep(vault, 'demo', 'demo-003', { blockedBy: ['demo-001'] });
+    putDep(vault, 'demo', 'demo-004', { blockedBy: ['demo-001', 'demo-002'] });
+    assert.match(run('show', 'demo-001').stdout, /^Unblocks: demo-003, demo-004$/m);
+    const r = run('close', 'demo-001', ...shipArgs(vault));
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^Unblocked: demo-003$/m);
+});

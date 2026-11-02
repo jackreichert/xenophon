@@ -172,14 +172,15 @@ unreviewed — only you mark it read.
 
 ```bash
 ticket.mjs list                    # all active work (open/in-progress/blocked), highest priority first
-ticket.mjs list --ready            # open, and not waiting on an unclosed blocker
+ticket.mjs list --ready            # same rule as `ready` below
+ticket.mjs ready [--under <id>] [--limit n] [--json]   # what to pick up next, best first
 ticket.mjs list --status all       # including closed
 ticket.mjs list --status open      # exactly 'open', excluding in-progress
 ticket.mjs list --label test-flake
 ticket.mjs list --decisions        # tickets waiting on a decision
 ```
 
-`--ready` is the "what can I actually pick up" view: it hides anything whose `blocked-by` still points at an open ticket.
+`ready` and `list --ready` share one rule. A ticket is ready when its status is exactly `open`, every `blocked-by` id exists anywhere in the vault and is closed (an unknown id is not ready, with a warning), it has no unclosed descendants, and it has no `decision_needed`. `ready` orders by priority, then how many tickets it would transitively unblock (most first), then id. `new` and `set` refuse a `blocked-by` id that does not exist or that would close a cycle. `show` prints `Unblocks:`, and `close` prints `Unblocked: a, b` for tickets whose last open blocker it was.
 
 ## Working in another repo or vault
 
